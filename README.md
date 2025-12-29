@@ -9,7 +9,7 @@ Complete training infrastructure for FaceXFormer-main with multi-GPU support and
 
 This implementation adapts the original facexformer-main architecture with comprehensive training capabilities:
 
-- ✅ Multi-task co-training on 7 tasks (NO expression recognition)
+- ✅ Multi-task co-training on 8 tasks (NO expression recognition)
 - ✅ Multi-GPU distributed data parallel (DDP) training
 - ✅ Single-GPU training support
 - ✅ Upsampling strategy for balanced task representation
@@ -61,7 +61,7 @@ This implementation adapts the original facexformer-main architecture with compr
 
 **Loss Function:**
 - Multi-task loss with proper gradient handling
-- Key existence checks for all 7 tasks
+- Key existence checks for all 8 tasks
 - Task-specific weighting and proper loss accumulation
 - Handles missing labels gracefully
 
@@ -74,7 +74,7 @@ This implementation adapts the original facexformer-main architecture with compr
 ### Architecture Details
 
 - **Model**: FaceXFormer with Swin-Base backbone
-- **Tasks**: 7 tasks (segmentation, landmark, headpose, attribute, age, gender, race, visibility)
+- **Tasks**: 8 tasks (segmentation, landmark, headpose, attribute, age, gender, race, visibility)
 - **Task Tokens**: 18 total (7 single + 11 mask tokens)
 - **Parameters**: ~92M
 - **Training**: Multi-GPU DDP with balanced batch sampling
