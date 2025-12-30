@@ -21,6 +21,10 @@ from tqdm import tqdm
 import os
 import argparse
 from pathlib import Path
+import warnings
+
+# Suppress DDP gradient stride mismatch warning (performance warning only, not an error)
+warnings.filterwarnings('ignore', message='Grad strides do not match bucket view strides')
 
 from config import config
 from network.models.facexformer import FaceXFormer
@@ -81,21 +85,33 @@ def train_one_epoch(
     task_losses = {}
     
     if rank == 0:
+        print(f"Starting epoch {epoch} training with {len(dataloader)} batches...")
         pbar = tqdm(dataloader, desc=f'Epoch {epoch} [Train]')
     else:
         pbar = dataloader
     
     for batch_idx, (images, targets) in enumerate(pbar):
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] Loading first batch...")
         images = images.to(device)
         task_ids = targets['task_id'].to(device)
+        
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] First batch loaded, shape: {images.shape}, moving targets to device...")
         
         # Move all targets to device
         for key in targets:
             targets[key] = targets[key].to(device)
         
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] Starting forward pass...")
+        
         # Forward pass
         landmark_out, headpose_out, attribute_out, visibility_out, \
         age_out, gender_out, race_out, seg_out = model(images, targets, task_ids)
+        
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] Forward pass complete, computing loss...")
         
         # Prepare predictions dict
         predictions = {
@@ -117,11 +133,21 @@ def train_one_epoch(
             compute_individual=True
         )
         
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] Loss computed: {loss.item():.4f}, starting backward pass...")
+        
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
+        
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] Backward pass complete, clipping gradients...")
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        
+        if rank == 0 and batch_idx == 0:
+            print(f"[rank{rank}] First iteration complete!")
         
         # Accumulate losses
         total_loss += loss.item()
@@ -259,7 +285,6 @@ def main():
             print("  Loading CelebAMask-HQ...")
         celebamask_train = CelebAMaskHQDataset('train')
         celebamask_test = CelebAMaskHQDataset('test')
-        print(f"[rank{rank}] CelebAMask-HQ loaded: {len(celebamask_train)} train, {len(celebamask_test)} test")
         
         if rank == 0:
             print("  Loading 300W...")
@@ -446,6 +471,13 @@ def main():
                 print(f"\n{'='*60}")
                 print(f"Epoch {epoch}/{config.NUM_EPOCHS}")
                 print(f"{'='*60}")
+            
+            # Synchronize before training to ensure all ranks are ready
+            if world_size > 1:
+                dist.barrier()
+            
+            if rank == 0:
+                print(f"[rank{rank}] About to call train_one_epoch...")
             
             # Train
             train_loss, train_task_losses = train_one_epoch(
