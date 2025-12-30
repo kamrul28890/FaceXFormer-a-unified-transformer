@@ -240,23 +240,26 @@ def main():
         print(f"\n{'='*60}")
         print(f"FaceXFormer-main Training")
         print(f"{'='*60}")
-        print(f"World size: {world_size}")
+        print(f"Number of GPUs: {world_size}")
         print(f"Batch size per GPU: {config.BATCH_SIZE}")
         print(f"Effective batch size: {config.BATCH_SIZE * world_size}")
+        print(f"Learning rate: {config.LEARNING_RATE}")
         print(f"{'='*60}\n")
     
     # Set device
     device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
     
     # Create datasets (NO expression datasets)
+    # NOTE: All GPUs load datasets, but data is split via DistributedSampler
     if rank == 0:
-        print("Loading datasets...")
+        print("Loading datasets (all GPUs are loading, only rank 0 prints)...")
     
     try:
         if rank == 0:
             print("  Loading CelebAMask-HQ...")
         celebamask_train = CelebAMaskHQDataset('train')
         celebamask_test = CelebAMaskHQDataset('test')
+        print(f"[rank{rank}] CelebAMask-HQ loaded: {len(celebamask_train)} train, {len(celebamask_test)} test")
         
         if rank == 0:
             print("  Loading 300W...")

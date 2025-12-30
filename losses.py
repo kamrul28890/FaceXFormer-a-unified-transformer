@@ -47,14 +47,14 @@ class DiceLoss(nn.Module):
         # Clamp to prevent CUDA device-side asserts in scatter_ operation
         valid_target = torch.clamp(valid_target, 0, num_classes - 1)
         target_one_hot.scatter_(1, valid_target.unsqueeze(1), 1)
-        target_one_hot *= valid_mask  # zero out ignored pixels
+        target_one_hot = target_one_hot * valid_mask  # zero out ignored pixels (non-in-place)
         
-        # Apply mask to predictions
-        pred_soft *= valid_mask
+        # Apply mask to predictions (non-in-place to avoid breaking gradient graph)
+        pred_soft_masked = pred_soft * valid_mask
         
         # Compute dice only on valid pixels
-        intersection = (pred_soft * target_one_hot).sum(dim=(2, 3))
-        union = pred_soft.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
+        intersection = (pred_soft_masked * target_one_hot).sum(dim=(2, 3))
+        union = pred_soft_masked.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
         
         dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
         return 1.0 - dice.mean()
