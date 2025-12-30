@@ -10,6 +10,7 @@ Features:
 - Checkpoint saving and loading
 """
 
+from typing import Dict
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,6 +23,9 @@ import os
 import argparse
 from pathlib import Path
 import warnings
+import json
+from sklearn.metrics import f1_score, accuracy_score, precision_recall_curve
+import numpy as np
 
 # Suppress DDP gradient stride mismatch warning (performance warning only, not an error)
 warnings.filterwarnings('ignore', message='Grad strides do not match bucket view strides')
@@ -253,6 +257,395 @@ def validate(
     avg_task_losses = {k: v / len(dataloader) for k, v in task_losses.items()}
     
     return avg_loss, avg_task_losses
+
+
+def compute_nme(predictions, ground_truth, image_size=224):
+    """
+    Compute Normalized Mean Error for landmark prediction.
+    
+    Args:
+        predictions: [B, 136] tensor (68 landmarks * 2)
+        ground_truth: [B, 136] tensor
+        image_size: normalization factor (image diagonal)
+    
+    Returns:
+        float: NME value
+    """
+    predictions = predictions.cpu().numpy()
+    ground_truth = ground_truth.cpu().numpy()
+    
+    # Reshape to [B, 68, 2]
+    pred_pts = predictions.reshape(-1, 68, 2)
+    gt_pts = ground_truth.reshape(-1, 68, 2)
+    
+    # Compute Euclidean distance for each landmark
+    distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))  # [B, 68]
+    
+    # Normalize by image diagonal (sqrt(224^2 + 224^2))
+    diagonal = np.sqrt(image_size ** 2 + image_size ** 2)
+    nme = np.mean(distances) / diagonal * 100  # Convert to percentage
+    
+    return nme
+
+
+def compute_mae(predictions, ground_truth):
+    """
+    Compute Mean Absolute Error.
+    
+    Args:
+        predictions: tensor
+        ground_truth: tensor
+    
+    Returns:
+        float: MAE value
+    """
+    predictions = predictions.cpu().numpy()
+    ground_truth = ground_truth.cpu().numpy()
+    
+    mae = np.mean(np.abs(predictions - ground_truth))
+    return mae
+
+
+def compute_f1_score(predictions, ground_truth, num_classes=11):
+    """
+    Compute F1-score for segmentation (macro average across classes).
+    
+    Args:
+        predictions: [B, C, H, W] tensor (logits)
+        ground_truth: [B, H, W] tensor (class indices)
+        num_classes: number of segmentation classes
+    
+    Returns:
+        float: macro F1-score
+    """
+    # Get predicted classes
+    pred_classes = torch.argmax(predictions, dim=1)  # [B, H, W]
+    
+    # Flatten
+    pred_flat = pred_classes.cpu().numpy().flatten()
+    gt_flat = ground_truth.cpu().numpy().flatten()
+    
+    # Compute macro F1 (average across classes)
+    f1 = f1_score(gt_flat, pred_flat, average='macro', labels=range(num_classes), zero_division=0)
+    
+    return f1
+
+
+def compute_accuracy(predictions, ground_truth):
+    """
+    Compute accuracy for classification tasks.
+    
+    Args:
+        predictions: [B, C] tensor (logits) or [B, num_attributes] for multi-label
+        ground_truth: [B] tensor (class indices) or [B, num_attributes] for multi-label
+    
+    Returns:
+        float: accuracy
+    """
+    if len(predictions.shape) > 2:  # Multi-class classification
+        pred_classes = torch.argmax(predictions, dim=1)
+    else:  # Multi-label or binary
+        if predictions.shape[1] > 1:  # Multi-label (attributes)
+            pred_classes = (torch.sigmoid(predictions) > 0.5).float()
+            # For multi-label, compute average accuracy across attributes
+            correct = (pred_classes == ground_truth).float().mean()
+            return correct.item()
+        else:  # Binary classification
+            pred_classes = (torch.sigmoid(predictions) > 0.5).long().squeeze()
+    
+    pred_classes = pred_classes.cpu().numpy()
+    ground_truth = ground_truth.cpu().numpy()
+    
+    acc = accuracy_score(ground_truth, pred_classes)
+    return acc
+
+
+def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8):
+    """
+    Compute recall at a given precision threshold for visibility prediction.
+    
+    Args:
+        predictions: [B, 68] tensor (visibility scores per landmark)
+        ground_truth: [B, 68] tensor (binary visibility labels)
+        target_precision: desired precision threshold (default 0.8)
+    
+    Returns:
+        float: recall at target precision
+    """
+    predictions = torch.sigmoid(predictions).cpu().numpy().flatten()
+    ground_truth = ground_truth.cpu().numpy().flatten()
+    
+    # Compute precision-recall curve
+    precisions, recalls, thresholds = precision_recall_curve(ground_truth, predictions)
+    
+    # Find recall at target precision
+    idx = np.where(precisions >= target_precision)[0]
+    if len(idx) > 0:
+        recall_at_prec = recalls[idx[0]]
+    else:
+        recall_at_prec = 0.0
+    
+    return recall_at_prec
+
+
+def validate_per_dataset(
+    model: nn.Module,
+    test_datasets: Dict[str, list],
+    criterion: nn.Module,
+    device: torch.device,
+    rank: int = 0,
+    world_size: int = 1
+):
+    """
+    Evaluate the model on test set with per-dataset breakdown and task-specific metrics.
+    
+    Returns:
+        dict: Nested dictionary with structure:
+            {
+                'task_name': {
+                    'dataset_name': {
+                        'loss': loss_value,
+                        'metric': metric_value  # F1, NME, MAE, Accuracy, or Recall
+                    },
+                    'overall': {
+                        'loss': average_loss,
+                        'metric': average_metric
+                    }
+                },
+                'total': overall_loss
+            }
+    """
+    model.eval()
+    results = {}
+    
+    if rank == 0:
+        print(f"\n{'='*80}")
+        print("FINAL TEST SET EVALUATION")
+        print(f"{'='*80}\n")
+    
+    total_loss = 0.0
+    total_samples = 0
+    
+    # Task ID mapping
+    task_id_map = {
+        'segmentation': 0,
+        'landmark': 1,
+        'headpose': 2,
+        'attribute': 3,
+        'age': 4,
+        'gender': 5,
+        'race': 6,
+        'visibility': 7
+    }
+    
+    # Metric names for each task
+    metric_names = {
+        'segmentation': 'F1-Score',
+        'landmark': 'NME (%)',
+        'headpose': 'MAE (degrees)',
+        'attribute': 'Accuracy',
+        'age': 'MAE (years)',
+        'gender': 'Accuracy',
+        'race': 'Accuracy',
+        'visibility': 'Recall@P80'
+    }
+    
+    # Evaluate each task separately
+    for task_name, datasets in test_datasets.items():
+        if rank == 0:
+            print(f"\n{'─'*80}")
+            print(f"📊 TASK: {task_name.upper()} (Metric: {metric_names[task_name]})")
+            print(f"{'─'*80}")
+        
+        results[task_name] = {}
+        task_total_loss = 0.0
+        task_total_metric = 0.0
+        task_total_samples = 0
+        
+        # Evaluate each dataset for this task
+        for dataset_idx, dataset in enumerate(datasets):
+            dataset_name = dataset.__class__.__name__
+            
+            # Create dataloader for single dataset
+            if world_size > 1:
+                from torch.utils.data.distributed import DistributedSampler
+                sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=world_size,
+                    rank=rank,
+                    shuffle=False,
+                    drop_last=False
+                )
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=config.BATCH_SIZE,
+                    sampler=sampler,
+                    num_workers=config.NUM_WORKERS,
+                    pin_memory=True
+                )
+            else:
+                dataloader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=config.BATCH_SIZE,
+                    shuffle=False,
+                    num_workers=config.NUM_WORKERS,
+                    pin_memory=True
+                )
+            
+            dataset_loss = 0.0
+            dataset_metric = 0.0
+            num_batches = 0
+            
+            with torch.no_grad():
+                if rank == 0:
+                    pbar = tqdm(dataloader, desc=f'  📁 {dataset_name}', leave=False, ncols=100)
+                else:
+                    pbar = dataloader
+                
+                for images, targets in pbar:
+                    images = images.to(device)
+                    
+                    # Get task ID for this task
+                    task_id = task_id_map[task_name]
+                    batch_size = images.shape[0]
+                    task_ids = torch.full((batch_size,), task_id, dtype=torch.long, device=device)
+                    
+                    # Move targets to device
+                    for key in targets:
+                        if isinstance(targets[key], torch.Tensor):
+                            targets[key] = targets[key].to(device)
+                    
+                    # Add task_id to targets
+                    targets['task_id'] = task_ids
+                    
+                    # Forward pass
+                    landmark_out, headpose_out, attribute_out, visibility_out, \
+                    age_out, gender_out, race_out, seg_out = model(images, targets, task_ids)
+                    
+                    # Prepare predictions dict
+                    predictions = {
+                        'landmark_output': landmark_out,
+                        'headpose_output': headpose_out,
+                        'attribute_output': attribute_out,
+                        'visibility_output': visibility_out,
+                        'age_output': age_out,
+                        'gender_output': gender_out,
+                        'race_output': race_out,
+                        'seg_output': seg_out
+                    }
+                    
+                    # Compute loss
+                    loss, _ = criterion(
+                        predictions,
+                        targets,
+                        task_ids,
+                        compute_individual=True
+                    )
+                    
+                    dataset_loss += loss.item()
+                    num_batches += 1
+                    
+                    # Compute task-specific metric
+                    if task_name == 'segmentation':
+                        if 'seg_mask' in targets:
+                            metric = compute_f1_score(seg_out, targets['seg_mask'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'landmark':
+                        if 'landmarks' in targets:
+                            metric = compute_nme(landmark_out, targets['landmarks'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'headpose':
+                        if 'headpose' in targets:
+                            # Headpose is [yaw, pitch, roll]
+                            metric = compute_mae(headpose_out, targets['headpose'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'attribute':
+                        if 'attributes' in targets:
+                            metric = compute_accuracy(attribute_out, targets['attributes'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'age':
+                        if 'age' in targets:
+                            metric = compute_mae(age_out.squeeze(), targets['age'].float())
+                            dataset_metric += metric
+                    
+                    elif task_name == 'gender':
+                        if 'gender' in targets:
+                            metric = compute_accuracy(gender_out, targets['gender'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'race':
+                        if 'race' in targets:
+                            metric = compute_accuracy(race_out, targets['race'])
+                            dataset_metric += metric
+                    
+                    elif task_name == 'visibility':
+                        if 'visibility' in targets:
+                            metric = compute_recall_at_precision(visibility_out, targets['visibility'])
+                            dataset_metric += metric
+                    
+                    if rank == 0:
+                        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            
+            # Synchronize across GPUs
+            if world_size > 1:
+                # Gather losses from all ranks
+                dataset_loss_tensor = torch.tensor(dataset_loss, device=device)
+                dataset_metric_tensor = torch.tensor(dataset_metric, device=device)
+                num_batches_tensor = torch.tensor(num_batches, device=device)
+                
+                torch.distributed.all_reduce(dataset_loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(dataset_metric_tensor, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(num_batches_tensor, op=torch.distributed.ReduceOp.SUM)
+                
+                dataset_loss = dataset_loss_tensor.item()
+                dataset_metric = dataset_metric_tensor.item()
+                num_batches = num_batches_tensor.item()
+            
+            # Average loss and metric for this dataset
+            avg_dataset_loss = dataset_loss / num_batches if num_batches > 0 else 0.0
+            avg_dataset_metric = dataset_metric / num_batches if num_batches > 0 else 0.0
+            
+            results[task_name][dataset_name] = {
+                'loss': avg_dataset_loss,
+                'metric': avg_dataset_metric
+            }
+            
+            task_total_loss += dataset_loss
+            task_total_metric += dataset_metric
+            task_total_samples += num_batches
+            
+            if rank == 0:
+                print(f"  ├─ {dataset_name:30s}: Loss={avg_dataset_loss:.6f}, {metric_names[task_name]}={avg_dataset_metric:.4f}")
+        
+        # Compute overall task loss and metric
+        avg_task_loss = task_total_loss / task_total_samples if task_total_samples > 0 else 0.0
+        avg_task_metric = task_total_metric / task_total_samples if task_total_samples > 0 else 0.0
+        
+        results[task_name]['overall'] = {
+            'loss': avg_task_loss,
+            'metric': avg_task_metric
+        }
+        
+        total_loss += task_total_loss
+        total_samples += task_total_samples
+        
+        if rank == 0:
+            print(f"  └─ {'OVERALL':30s}: Loss={avg_task_loss:.6f}, {metric_names[task_name]}={avg_task_metric:.4f}")
+    
+    # Compute total loss across all tasks
+    avg_total_loss = total_loss / total_samples if total_samples > 0 else 0.0
+    results['total'] = avg_total_loss
+    
+    if rank == 0:
+        print(f"\n{'─'*80}")
+        print(f"🎯 TOTAL LOSS (All Tasks): {avg_total_loss:.6f}")
+        print(f"{'='*80}\n")
+    
+    return results
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, filepath, rank=0):
@@ -506,7 +899,7 @@ def main():
         os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     
     # Training loop
-    best_test_loss = float('inf')
+    best_train_loss = float('inf')
     
     try:
         for epoch in range(start_epoch, config.NUM_EPOCHS + 1):
@@ -541,42 +934,91 @@ def main():
                 for task_name, task_loss in train_task_losses.items():
                     print(f"  {task_name}: {task_loss:.4f}")
             
-            # Test evaluation
-            test_loss, test_task_losses = validate(
-                model, test_loader, criterion, epoch, device, rank
-            )
-            
-            if rank == 0:
-                print(f"\nTest Loss: {test_loss:.4f}")
-                print("Test Task Losses:")
-                for task_name, task_loss in test_task_losses.items():
-                    print(f"  {task_name}: {task_loss:.4f}")
-            
             # Learning rate scheduling
             scheduler.step()
             
-            # Save checkpoint
+            # Save checkpoint based on training loss
             if rank == 0:
-                if test_loss < best_test_loss:
-                    best_test_loss = test_loss
+                if train_loss < best_train_loss:
+                    best_train_loss = train_loss
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, test_loss,
+                        model, optimizer, scheduler, epoch, train_loss,
                         os.path.join(config.CHECKPOINT_DIR, 'best_model.pth'),
                         rank
                     )
                 
                 if epoch % config.SAVE_FREQ == 0:
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, test_loss,
+                        model, optimizer, scheduler, epoch, train_loss,
                         os.path.join(config.CHECKPOINT_DIR, f'checkpoint_epoch_{epoch}.pth'),
                         rank
                     )
         
+        # =====================================================================
+        # FINAL TEST SET EVALUATION (ONLY ONCE AFTER TRAINING)
+        # =====================================================================
         if rank == 0:
             print(f"\n{'='*60}")
             print("Training completed!")
-            print(f"Best test loss: {best_test_loss:.4f}")
+            print(f"Best training loss: {best_train_loss:.4f}")
             print(f"{'='*60}\n")
+        
+        # Synchronize all ranks before final evaluation
+        if world_size > 1:
+            dist.barrier()
+        
+        # Perform detailed test set evaluation
+        test_results = validate_per_dataset(
+            model, test_datasets, criterion, device, rank, world_size
+        )
+        
+        # Save test results to file (rank 0 only)
+        if rank == 0:
+            results_file = os.path.join(config.CHECKPOINT_DIR, 'test_results.json')
+            with open(results_file, 'w') as f:
+                json.dump(test_results, f, indent=2)
+            print(f"\n✓ Test results saved to: {results_file}")
+            
+            # Print summary table
+            print(f"\n{'='*100}")
+            print("📊 TEST SET SUMMARY")
+            print(f"{'='*100}")
+            print(f"{'Task':<20} {'Dataset':<30} {'Loss':<15} {'Metric':<15} {'Value':<15}")
+            print(f"{'─'*100}")
+            
+            for task_name, task_results in test_results.items():
+                if task_name == 'total':
+                    continue
+                
+                metric_name = {
+                    'segmentation': 'F1-Score',
+                    'landmark': 'NME (%)',
+                    'headpose': 'MAE (deg)',
+                    'attribute': 'Accuracy',
+                    'age': 'MAE (years)',
+                    'gender': 'Accuracy',
+                    'race': 'Accuracy',
+                    'visibility': 'Recall@P80'
+                }[task_name]
+                
+                first = True
+                for dataset_name, metrics in task_results.items():
+                    if dataset_name == 'overall':
+                        continue
+                    
+                    if first:
+                        print(f"{task_name:<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                        first = False
+                    else:
+                        print(f"{'':<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                
+                # Print overall for this task
+                if 'overall' in task_results:
+                    print(f"{'':<20} {'[OVERALL]':<30} {task_results['overall']['loss']:.6f}      {metric_name:<15} {task_results['overall']['metric']:.4f}")
+                print(f"{'─'*100}")
+            
+            print(f"{'TOTAL (All Tasks)':<20} {'':<30} {test_results['total']:.6f}")
+            print(f"{'='*100}\n")
     
     finally:
         # Cleanup distributed training (always executed, even on exceptions)
