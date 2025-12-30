@@ -126,9 +126,6 @@ class FaceDecoder(nn.Module):
         b, c, h, w = upscaled_embedding.shape
         seg_output = (hyper_in @ upscaled_embedding.view(b, c, h * w)).view(b, -1, h, w)
         
-        # Upsample segmentation output to 224x224 (paper mentions upsampling for segmentation)
-        seg_output = F.interpolate(seg_output, size=(224, 224), mode='bilinear', align_corners=False)
-        
         return landmark_output, headpose_output, attribute_output, visibility_output, age_output, gender_output, race_output, seg_output
 
 
