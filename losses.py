@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
+import math
 
 
 class DiceLoss(nn.Module):
@@ -35,21 +36,26 @@ class DiceLoss(nn.Module):
         valid_mask = (target != self.ignore_index).unsqueeze(1)  # [B, 1, H, W]
         
         if not valid_mask.any():
-            return torch.tensor(0.0, device=pred.device)
+            return torch.tensor(0.0, device=pred.device, requires_grad=True)
         
         num_classes = pred.shape[1]
+        
+        # Check for NaN/Inf ONLY - don't clamp normal values
+        if torch.isnan(pred).any() or torch.isinf(pred).any():
+            print("⚠️ WARNING: NaN/Inf in segmentation predictions - replacing with zeros")
+            pred = torch.nan_to_num(pred, nan=0.0, posinf=100.0, neginf=-100.0)
+        
         pred_soft = F.softmax(pred, dim=1)
         
         # Convert target to one-hot, but only for valid pixels
         target_one_hot = torch.zeros_like(pred_soft)
         valid_target = target.clone()
         valid_target[target == self.ignore_index] = 0  # temporary for one_hot
-        # Clamp to prevent CUDA device-side asserts in scatter_ operation
         valid_target = torch.clamp(valid_target, 0, num_classes - 1)
         target_one_hot.scatter_(1, valid_target.unsqueeze(1), 1)
-        target_one_hot = target_one_hot * valid_mask  # zero out ignored pixels (non-in-place)
+        target_one_hot = target_one_hot * valid_mask
         
-        # Apply mask to predictions (non-in-place to avoid breaking gradient graph)
+        # Apply mask to predictions
         pred_soft_masked = pred_soft * valid_mask
         
         # Compute dice only on valid pixels
@@ -57,7 +63,9 @@ class DiceLoss(nn.Module):
         union = pred_soft_masked.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
         
         dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        return 1.0 - dice.mean()
+        dice_loss = 1.0 - dice.mean()
+        
+        return dice_loss
 
 
 class MultiTaskLoss(nn.Module):
@@ -78,6 +86,17 @@ class MultiTaskLoss(nn.Module):
         # Classification losses
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
         
+    def _check_for_anomalies(self, tensor: torch.Tensor, name: str) -> bool:
+        """Check for NaN/Inf and print warning. Returns True if anomaly found."""
+        has_nan = torch.isnan(tensor).any()
+        has_inf = torch.isinf(tensor).any()
+        
+        if has_nan or has_inf:
+            print(f"⚠️ WARNING: {'NaN' if has_nan else 'Inf'} detected in {name}!")
+            print(f"   Tensor stats - min: {tensor.min().item():.4f}, max: {tensor.max().item():.4f}")
+            return True
+        return False
+    
     def forward(
         self,
         predictions: Dict[str, torch.Tensor],
@@ -108,48 +127,47 @@ class MultiTaskLoss(nn.Module):
         # =====================================================================
         if 'seg_output' in predictions:
             seg_pred = predictions['seg_output']  # [B, 11, H, W]
+            
             if 'segmentation' in labels:
                 seg_target = labels['segmentation'].to(device)  # [B, H, W]
-                # Clamp to valid class range
                 seg_target = torch.clamp(seg_target, 0, 10)  # 11 classes: 0-10
                 
-                # Create mask for segmentation samples (task_id=0)
                 seg_mask = (task_ids == 0)
                 
                 if seg_mask.any():
-                    # Apply ignore index to non-segmentation samples
                     seg_target_masked = seg_target.clone()
-                    seg_target_masked[~seg_mask] = -100  # ignore_index
+                    seg_target_masked[~seg_mask] = -100
                     
-                    # Compute loss (Dice and CE are already averaged internally)
                     dice = self.dice_loss(seg_pred, seg_target_masked)
                     ce = self.ce_loss(seg_pred, seg_target_masked)
-                    seg_loss = (dice + ce) / 2.0  # Mean of dice and CE
+                    seg_loss = (dice + ce) / 2.0
+                    
+                    if self._check_for_anomalies(seg_loss, "seg_loss"):
+                        seg_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['seg'] = seg_loss
                     weighted_loss = self.loss_weights['seg'] * seg_loss
                     total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
         # =====================================================================
-        # 2. LANDMARK LOSS (L_ind = L1 or STAR loss)
+        # 2. LANDMARK LOSS (L_ind = L1)
         # =====================================================================
         if 'landmark_output' in predictions:
             lm_pred = predictions['landmark_output']  # [B, 136]
+            
             if 'landmark' in labels:
                 lm_target = labels['landmark'].to(device)  # [B, 136]
-                
-                # Create mask for landmark samples (task_id=1)
                 lm_mask = (task_ids == 1)
                 
                 if lm_mask.any():
-                    # Extract only landmark samples
-                    lm_pred_masked = lm_pred[lm_mask]  # [N, 136]
-                    lm_target_masked = lm_target[lm_mask]  # [N, 136]
+                    lm_pred_masked = lm_pred[lm_mask]
+                    lm_target_masked = lm_target[lm_mask]
                     
-                    # L1 loss on landmarks (coordinates in pixel space 0-224)
-                    # NOTE: Landmarks should ideally be normalized to [0, 1]
-                    # If they're in pixel coordinates, divide by image size for stability
+                    # Normalize by image size for stability
                     lm_loss = self.l1_loss(lm_pred_masked / 224.0, lm_target_masked / 224.0)
+                    
+                    if self._check_for_anomalies(lm_loss, "landmark_loss"):
+                        lm_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['ind'] = lm_loss
                     weighted_loss = self.loss_weights['ind'] * lm_loss
@@ -160,21 +178,20 @@ class MultiTaskLoss(nn.Module):
         # =====================================================================
         if 'headpose_output' in predictions:
             pose_pred = predictions['headpose_output']  # [B, 3]
+            
             if 'headpose' in labels:
                 pose_target = labels['headpose'].to(device)  # [B, 3]
-                
-                # Create mask for head pose samples (task_id=2)
                 pose_mask = (task_ids == 2)
                 
                 if pose_mask.any():
-                    # Extract only head pose samples
-                    pose_pred_masked = pose_pred[pose_mask]  # [N, 3]
-                    pose_target_masked = pose_target[pose_mask]  # [N, 3]
+                    pose_pred_masked = pose_pred[pose_mask]
+                    pose_target_masked = pose_target[pose_mask]
                     
-                    # L1 loss on Euler angles (in radians, typically -π to π)
                     # Normalize by π for stability
-                    import math
                     pose_loss = self.l1_loss(pose_pred_masked / math.pi, pose_target_masked / math.pi)
+                    
+                    if self._check_for_anomalies(pose_loss, "headpose_loss"):
+                        pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['hpe'] = pose_loss
                     weighted_loss = self.loss_weights['hpe'] * pose_loss
@@ -185,17 +202,21 @@ class MultiTaskLoss(nn.Module):
         # =====================================================================
         if 'attribute_output' in predictions:
             attr_pred = predictions['attribute_output']  # [B, 40]
+            
             if 'attribute' in labels:
-                # Create mask for attribute samples (task_id=3)
                 attr_mask = (task_ids == 3)
                 
                 if attr_mask.any():
-                    # Extract only attribute samples
                     attr_pred_masked = attr_pred[attr_mask]
-                    attr_target_masked = labels['attribute'][attr_mask].to(device)
+                    attr_target_masked = labels['attribute'][attr_mask].to(device).float()
                     
-                    # BCE loss (already averaged over 40 attributes)
-                    attr_loss = self.bce_loss(attr_pred_masked, attr_target_masked.float())
+                    # Ensure targets are in [0, 1]
+                    attr_target_masked = torch.clamp(attr_target_masked, 0.0, 1.0)
+                    
+                    attr_loss = self.bce_loss(attr_pred_masked, attr_target_masked)
+                    
+                    if self._check_for_anomalies(attr_loss, "attribute_loss"):
+                        attr_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['attr'] = attr_loss
                     weighted_loss = self.loss_weights['attr'] * attr_loss
@@ -205,37 +226,31 @@ class MultiTaskLoss(nn.Module):
         # 5. AGE LOSS (L_a = mean of L1 + CE)
         # =====================================================================
         if 'age_output' in predictions:
-            age_pred = predictions['age_output']  # [B, 8] - logits for 8 age groups
+            age_pred = predictions['age_output']  # [B, 8]
+            
             if 'age' in labels:
-                # Create mask for age samples (task_id=4 or 5 depending on dataset)
-                age_mask = (task_ids == 4) | (task_ids == 5)  # Support both task IDs
+                age_mask = (task_ids == 4) | (task_ids == 5)
                 
                 if age_mask.any():
-                    # Extract only age samples
                     age_pred_masked = age_pred[age_mask]
                     age_target_masked = labels['age'][age_mask].to(device)
-                    
-                    # Clamp to valid range
-                    age_target_masked = torch.clamp(age_target_masked.long(), 0, 7)  # 8 age groups
+                    age_target_masked = torch.clamp(age_target_masked.long(), 0, 7)
                     
                     # Classification loss (CE)
                     age_ce = F.cross_entropy(age_pred_masked, age_target_masked, reduction='mean')
                     
-                    # Regression loss (L1) - convert class to age value
-                    # Age groups: [0-2, 4-6, 8-13, 15-20, 25-32, 38-43, 48-53, 60+]
+                    # Regression loss (L1)
                     age_bins = torch.tensor([1, 5, 10, 17, 28, 40, 50, 65], 
                                            device=device, dtype=torch.float32)
-                    age_gt_value = age_bins[age_target_masked]  # [N]
-                    
-                    # Predicted age value (weighted sum of bins)
-                    age_probs = F.softmax(age_pred_masked, dim=1)  # [N, 8]
-                    age_pred_value = (age_probs * age_bins).sum(dim=1)  # [N]
-                    
-                    # Normalize L1 loss by age range (100 years) for stability
+                    age_gt_value = age_bins[age_target_masked]
+                    age_probs = F.softmax(age_pred_masked, dim=1)
+                    age_pred_value = (age_probs * age_bins).sum(dim=1)
                     age_l1 = self.l1_loss(age_pred_value / 100.0, age_gt_value / 100.0)
                     
-                    # Mean of CE and normalized L1
                     age_loss = (age_ce + age_l1) / 2.0
+                    
+                    if self._check_for_anomalies(age_loss, "age_loss"):
+                        age_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['a'] = age_loss
                     weighted_loss = self.loss_weights['a'] * age_loss
@@ -246,20 +261,19 @@ class MultiTaskLoss(nn.Module):
         # =====================================================================
         if 'gender_output' in predictions:
             gender_pred = predictions['gender_output']  # [B, 2]
+            
             if 'gender' in labels:
-                # Create mask for gender samples (task_id=5 or 6)
                 gender_mask = (task_ids == 5) | (task_ids == 6)
                 
                 if gender_mask.any():
-                    # Extract only gender samples
                     gender_pred_masked = gender_pred[gender_mask]
                     gender_target_masked = labels['gender'][gender_mask].to(device)
+                    gender_target_masked = torch.clamp(gender_target_masked.long(), 0, 1)
                     
-                    # Clamp to valid range
-                    gender_target_masked = torch.clamp(gender_target_masked.long(), 0, 1)  # 2 classes
-                    
-                    # CE loss
                     gender_loss = F.cross_entropy(gender_pred_masked, gender_target_masked, reduction='mean')
+                    
+                    if self._check_for_anomalies(gender_loss, "gender_loss"):
+                        gender_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['gender'] = gender_loss
                     weighted_loss = self.loss_weights['g/r'] * gender_loss
@@ -270,48 +284,76 @@ class MultiTaskLoss(nn.Module):
         # =====================================================================
         if 'race_output' in predictions:
             race_pred = predictions['race_output']  # [B, 5]
+            
             if 'race' in labels:
-                # Create mask for race samples (task_id=6 or 7)
                 race_mask = (task_ids == 6) | (task_ids == 7)
                 
                 if race_mask.any():
-                    # Extract only race samples
                     race_pred_masked = race_pred[race_mask]
                     race_target_masked = labels['race'][race_mask].to(device)
+                    race_target_masked = torch.clamp(race_target_masked.long(), 0, 4)
                     
-                    # Clamp to valid range
-                    race_target_masked = torch.clamp(race_target_masked.long(), 0, 4)  # 5 classes
-                    
-                    # CE loss
                     race_loss = F.cross_entropy(race_pred_masked, race_target_masked, reduction='mean')
+                    
+                    if self._check_for_anomalies(race_loss, "race_loss"):
+                        race_loss = torch.tensor(0.0, device=device, requires_grad=True)
                     
                     losses['race'] = race_loss
                     weighted_loss = self.loss_weights['g/r'] * race_loss
                     total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
         # =====================================================================
-        # 8. VISIBILITY LOSS (L_vis = BCE)
+        # 8. VISIBILITY LOSS (L_vis = BCE with element-wise filtering)
         # =====================================================================
         if 'visibility_output' in predictions:
             vis_pred = predictions['visibility_output']  # [B, 29]
+            
             if 'visibility' in labels:
-                # Create mask for visibility samples (task_id=7 or 8)
                 vis_mask = (task_ids == 7) | (task_ids == 8)
                 
                 if vis_mask.any():
-                    # Extract only visibility samples
-                    vis_pred_masked = vis_pred[vis_mask]
-                    vis_target_masked = labels['visibility'][vis_mask].to(device)
+                    vis_pred_masked = vis_pred[vis_mask]  # [N, 29]
+                    vis_target_masked = labels['visibility'][vis_mask].to(device).float()  # [N, 29]
                     
-                    # BCE loss
-                    vis_loss = self.bce_loss(vis_pred_masked, vis_target_masked.float())
+                    # Create element-wise valid mask
+                    # Valid elements: not NaN, not -100, in range [0, 1]
+                    valid_elements = ~torch.isnan(vis_target_masked) & \
+                                    (vis_target_masked >= 0.0) & \
+                                    (vis_target_masked <= 1.0)
                     
-                    losses['vis'] = vis_loss
-                    weighted_loss = self.loss_weights['vis'] * vis_loss
-                    total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+                    if valid_elements.any():
+                        # Clamp targets to [0, 1]
+                        vis_target_clamped = torch.clamp(vis_target_masked, 0.0, 1.0)
+                        
+                        # Compute BCE per element
+                        bce_per_element = F.binary_cross_entropy_with_logits(
+                            vis_pred_masked, 
+                            vis_target_clamped, 
+                            reduction='none'
+                        )  # [N, 29]
+                        
+                        # Only average over valid elements
+                        vis_loss = (bce_per_element * valid_elements.float()).sum() / valid_elements.sum().clamp(min=1.0)
+                        
+                        if self._check_for_anomalies(vis_loss, "visibility_loss"):
+                            vis_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                        
+                        losses['vis'] = vis_loss
+                        weighted_loss = self.loss_weights['vis'] * vis_loss
+                        total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+                    else:
+                        # No valid elements - skip
+                        print("⚠️ WARNING: No valid visibility targets - skipping visibility loss")
+                        losses['vis'] = torch.tensor(0.0, device=device, requires_grad=True)
         
         # If no losses were computed, return a zero tensor with gradient
         if total_loss is None:
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Final check for total loss anomalies
+        if self._check_for_anomalies(total_loss, "TOTAL_LOSS"):
+            print("🔴 CRITICAL: Total loss has NaN/Inf - returning zero loss")
+            print(f"Individual losses: {losses}")
             total_loss = torch.tensor(0.0, device=device, requires_grad=True)
         
         if compute_individual:

@@ -143,14 +143,16 @@ def train_one_epoch(
             print(f"[rank{rank}] Loss computed: {loss.item():.4f}, starting backward pass...")
         
         # Backward pass
-        optimizer.zero_grad()
         loss.backward()
+        
+        # Clip gradients to prevent explosion - this is the key!
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        optimizer.zero_grad()
         
         if rank == 0 and batch_idx == 0:
             print(f"[rank{rank}] Backward pass complete, clipping gradients...")
-        
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
         
         if rank == 0 and batch_idx == 0:
             print(f"[rank{rank}] First iteration complete!")
@@ -397,6 +399,37 @@ def main():
         rank=rank,
         world_size=world_size
     )
+    
+    # DEBUG: Verify distributed sampling is working
+    if rank == 0:
+        print(f"\n🔍 DATALOADER VERIFICATION:")
+        print(f"  Batches per GPU (rank 0): {len(train_loader)}")
+        print(f"  Batch size per GPU: {config.BATCH_SIZE}")
+        print(f"  World size: {world_size}")
+        print(f"  Total samples per epoch: {len(train_loader) * config.BATCH_SIZE * world_size}")
+    
+    # All ranks check their first batch to ensure different data
+    if world_size > 1:
+        for batch_idx, (images, targets) in enumerate(train_loader):
+            if batch_idx == 0:
+                # Get first sample index or task_id as identifier
+                task_ids = targets['task_id']
+                first_task_id = task_ids[0].item()
+                
+                # Gather from all ranks to verify they're different
+                all_first_ids = [None] * world_size
+                dist.all_gather_object(all_first_ids, first_task_id)
+                
+                if rank == 0:
+                    print(f"\n  First batch task_ids from each GPU: {all_first_ids}")
+                    if len(set(all_first_ids)) < world_size:
+                        print(f"  ⚠️ WARNING: Some GPUs have identical first batches!")
+                        print(f"  DistributedSampler may not be working correctly!")
+                    else:
+                        print(f"  ✅ All GPUs have different data - DistributedSampler working!")
+                
+                dist.barrier()
+            break
     
     test_loader = create_multi_task_dataloader(
         test_datasets,
