@@ -422,70 +422,72 @@ def main():
     # Training loop
     best_test_loss = float('inf')
     
-    for epoch in range(start_epoch, config.NUM_EPOCHS + 1):
-        # Set epoch for proper shuffling in distributed training
-        if world_size > 1:
-            # Handle both batch_sampler and regular sampler
-            if hasattr(train_loader, 'batch_sampler') and hasattr(train_loader.batch_sampler, 'set_epoch'):
-                train_loader.batch_sampler.set_epoch(epoch)
-            elif hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
-                train_loader.sampler.set_epoch(epoch)
+    try:
+        for epoch in range(start_epoch, config.NUM_EPOCHS + 1):
+            # Set epoch for proper shuffling in distributed training
+            if world_size > 1:
+                # Handle both batch_sampler and regular sampler
+                if hasattr(train_loader, 'batch_sampler') and hasattr(train_loader.batch_sampler, 'set_epoch'):
+                    train_loader.batch_sampler.set_epoch(epoch)
+                elif hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
+                    train_loader.sampler.set_epoch(epoch)
+            
+            if rank == 0:
+                print(f"\n{'='*60}")
+                print(f"Epoch {epoch}/{config.NUM_EPOCHS}")
+                print(f"{'='*60}")
+            
+            # Train
+            train_loss, train_task_losses = train_one_epoch(
+                model, train_loader, criterion, optimizer, epoch, device, rank
+            )
+            
+            if rank == 0:
+                print(f"\nTrain Loss: {train_loss:.4f}")
+                print("Train Task Losses:")
+                for task_name, task_loss in train_task_losses.items():
+                    print(f"  {task_name}: {task_loss:.4f}")
+            
+            # Test evaluation
+            test_loss, test_task_losses = validate(
+                model, test_loader, criterion, epoch, device, rank
+            )
+            
+            if rank == 0:
+                print(f"\nTest Loss: {test_loss:.4f}")
+                print("Test Task Losses:")
+                for task_name, task_loss in test_task_losses.items():
+                    print(f"  {task_name}: {task_loss:.4f}")
+            
+            # Learning rate scheduling
+            scheduler.step()
+            
+            # Save checkpoint
+            if rank == 0:
+                if test_loss < best_test_loss:
+                    best_test_loss = test_loss
+                    save_checkpoint(
+                        model, optimizer, scheduler, epoch, test_loss,
+                        os.path.join(config.CHECKPOINT_DIR, 'best_model.pth'),
+                        rank
+                    )
+                
+                if epoch % config.SAVE_FREQ == 0:
+                    save_checkpoint(
+                        model, optimizer, scheduler, epoch, test_loss,
+                        os.path.join(config.CHECKPOINT_DIR, f'checkpoint_epoch_{epoch}.pth'),
+                        rank
+                    )
         
         if rank == 0:
             print(f"\n{'='*60}")
-            print(f"Epoch {epoch}/{config.NUM_EPOCHS}")
-            print(f"{'='*60}")
-        
-        # Train
-        train_loss, train_task_losses = train_one_epoch(
-            model, train_loader, criterion, optimizer, epoch, device, rank
-        )
-        
-        if rank == 0:
-            print(f"\nTrain Loss: {train_loss:.4f}")
-            print("Train Task Losses:")
-            for task_name, task_loss in train_task_losses.items():
-                print(f"  {task_name}: {task_loss:.4f}")
-        
-        # Test evaluation
-        test_loss, test_task_losses = validate(
-            model, test_loader, criterion, epoch, device, rank
-        )
-        
-        if rank == 0:
-            print(f"\nTest Loss: {test_loss:.4f}")
-            print("Test Task Losses:")
-            for task_name, task_loss in test_task_losses.items():
-                print(f"  {task_name}: {task_loss:.4f}")
-        
-        # Learning rate scheduling
-        scheduler.step()
-        
-        # Save checkpoint
-        if rank == 0:
-            if test_loss < best_test_loss:
-                best_test_loss = test_loss
-                save_checkpoint(
-                    model, optimizer, scheduler, epoch, test_loss,
-                    os.path.join(config.CHECKPOINT_DIR, 'best_model.pth'),
-                    rank
-                )
-            
-            if epoch % config.SAVE_FREQ == 0:
-                save_checkpoint(
-                    model, optimizer, scheduler, epoch, test_loss,
-                    os.path.join(config.CHECKPOINT_DIR, f'checkpoint_epoch_{epoch}.pth'),
-                    rank
-                )
+            print("Training completed!")
+            print(f"Best test loss: {best_test_loss:.4f}")
+            print(f"{'='*60}\n")
     
-    if rank == 0:
-        print(f"\n{'='*60}")
-        print("Training completed!")
-        print(f"Best test loss: {best_test_loss:.4f}")
-        print(f"{'='*60}\n")
-    
-    # Cleanup distributed training
-    cleanup_distributed()
+    finally:
+        # Cleanup distributed training (always executed, even on exceptions)
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
