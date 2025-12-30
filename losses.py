@@ -19,10 +19,11 @@ from typing import Dict, Tuple, Optional
 
 
 class DiceLoss(nn.Module):
-    """Dice loss for segmentation."""
-    def __init__(self, smooth: float = 1.0):
+    """Dice loss for segmentation with ignore index support."""
+    def __init__(self, smooth: float = 1.0, ignore_index: int = -100):
         super().__init__()
         self.smooth = smooth
+        self.ignore_index = ignore_index
         
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -30,13 +31,28 @@ class DiceLoss(nn.Module):
             pred: Predictions [B, C, H, W]
             target: Ground truth [B, H, W] (class indices)
         """
+        # Create mask for valid pixels (not ignore_index)
+        valid_mask = (target != self.ignore_index).unsqueeze(1)  # [B, 1, H, W]
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=pred.device)
+        
         num_classes = pred.shape[1]
         pred_soft = F.softmax(pred, dim=1)
         
-        # Convert target to one-hot
-        target_one_hot = F.one_hot(target.long(), num_classes).permute(0, 3, 1, 2).float()
+        # Convert target to one-hot, but only for valid pixels
+        target_one_hot = torch.zeros_like(pred_soft)
+        valid_target = target.clone()
+        valid_target[target == self.ignore_index] = 0  # temporary for one_hot
+        # Clamp to prevent CUDA device-side asserts in scatter_ operation
+        valid_target = torch.clamp(valid_target, 0, num_classes - 1)
+        target_one_hot.scatter_(1, valid_target.unsqueeze(1), 1)
+        target_one_hot *= valid_mask  # zero out ignored pixels
         
-        # Compute dice
+        # Apply mask to predictions
+        pred_soft *= valid_mask
+        
+        # Compute dice only on valid pixels
         intersection = (pred_soft * target_one_hot).sum(dim=(2, 3))
         union = pred_soft.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
         
@@ -52,8 +68,8 @@ class MultiTaskLoss(nn.Module):
         self.loss_weights = loss_weights
         
         # Segmentation losses
-        self.dice_loss = DiceLoss()
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.dice_loss = DiceLoss(ignore_index=-100)
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=-100)
         
         # Regression losses
         self.l1_loss = nn.L1Loss()
@@ -70,24 +86,20 @@ class MultiTaskLoss(nn.Module):
         compute_individual: bool = False
     ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """
-        Compute multi-task loss.
-        
-        NOTE: The model already filters outputs by task_id internally, so predictions
-        only contain samples for their respective tasks. We extract corresponding labels
-        using task_ids but don't filter predictions again.
+        Compute multi-task loss with full-batch computation for DDP consistency.
         
         Args:
-            predictions: Dict with keys matching task IDs (already filtered by model):
-                - 'seg_output': [N, 11, H, W] for segmentation (N = num seg samples)
-                - 'landmark_output': [N, 136] for landmarks (N = num landmark samples)
-                - 'headpose_output': [N, 3] for pose
-                - 'attribute_output': [N, 40] for attributes
-                - 'age_output': [N, 8] for age groups
-                - 'gender_output': [N, 2] for gender
-                - 'race_output': [N, 5] for race
-                - 'visibility_output': [N, 29] for visibility
+            predictions: Dict with full batch predictions for all tasks:
+                - 'landmark_output': [B, 136] for all samples
+                - 'headpose_output': [B, 3] for all samples
+                - 'attribute_output': [B, 40] for all samples
+                - 'visibility_output': [B, 29] for all samples
+                - 'age_output': [B, 8] for all samples
+                - 'gender_output': [B, 2] for all samples
+                - 'race_output': [B, 5] for all samples
+                - 'seg_output': [B, 11, H, W] for all samples
             labels: Ground truth dictionary (full batch)
-            task_ids: Task IDs for each sample in original batch [B]
+            task_ids: Task IDs for each sample [B]
             compute_individual: Whether to return individual task losses
             
         Returns:
@@ -97,69 +109,66 @@ class MultiTaskLoss(nn.Module):
         total_loss = None
         device = next(iter(predictions.values())).device
         
-        # Segmentation loss
-        if 'seg_output' in predictions and predictions['seg_output'].shape[0] > 0:
-            seg_pred = predictions['seg_output']
-            # Extract labels for segmentation samples (task_id=0)
-            seg_indices = (task_ids == 0).nonzero(as_tuple=True)[0]
-            if 'segmentation' not in labels or len(seg_indices) == 0:
-                pass
-            else:
-                seg_target = labels['segmentation'][seg_indices].to(device)
-                
-                # Handle batch size mismatch
-                if seg_pred.shape[0] != seg_target.shape[0]:
-                    min_batch = min(seg_pred.shape[0], seg_target.shape[0])
-                    seg_pred = seg_pred[:min_batch]
-                    seg_target = seg_target[:min_batch]
-                
-                if seg_target.dtype != torch.long:
-                    seg_target = seg_target.long()
-                seg_target = torch.clamp(seg_target, 0, 10)  # 11 classes (0-10)
-                
-                dice = self.dice_loss(seg_pred, seg_target)
-                ce = self.ce_loss(seg_pred, seg_target)
-                seg_loss = (dice + ce) / 2.0
-                
-                losses['seg'] = seg_loss
-                weighted_loss = self.loss_weights['seg'] * seg_loss
-                total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+        batch_size = task_ids.shape[0]
         
-        # Landmark loss
-        if 'landmark_output' in predictions and predictions['landmark_output'].shape[0] > 0:
-            lm_pred = predictions['landmark_output']
-            lm_indices = (task_ids == 1).nonzero(as_tuple=True)[0]
-            if 'landmark' in labels and len(lm_indices) > 0:
-                lm_target = labels['landmark'][lm_indices].to(device)
+        # Segmentation loss - full batch with ignore index
+        if 'seg_output' in predictions:
+            seg_pred = predictions['seg_output']  # [B, 11, H, W]
+            if 'segmentation' in labels:
+                seg_target = labels['segmentation'].to(device)  # [B, H, W]
+                # Clamp to valid class range to prevent CUDA device-side asserts
+                seg_target = torch.clamp(seg_target, 0, 10)  # 11 classes: 0-10
                 
-                # Handle batch size mismatch
-                if lm_pred.shape[0] != lm_target.shape[0]:
-                    min_batch = min(lm_pred.shape[0], lm_target.shape[0])
-                    lm_pred = lm_pred[:min_batch]
-                    lm_target = lm_target[:min_batch]
+                # Create mask for segmentation samples (task_id=0)
+                seg_mask = (task_ids == 0).unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
                 
-                lm_loss = self.l1_loss(lm_pred, lm_target)
-                losses['ind'] = lm_loss
-                weighted_loss = self.loss_weights['ind'] * lm_loss
-                total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+                if seg_mask.any():
+                    # Apply ignore index to non-segmentation samples
+                    seg_target_masked = seg_target.clone()
+                    seg_target_masked[~seg_mask.squeeze(-1).squeeze(-1)] = -100  # ignore_index
+                    
+                    # Compute loss only on masked regions
+                    dice = self.dice_loss(seg_pred, seg_target_masked)
+                    ce = self.ce_loss(seg_pred, seg_target_masked)
+                    seg_loss = (dice + ce) / 2.0
+                    
+                    losses['seg'] = seg_loss
+                    weighted_loss = self.loss_weights['seg'] * seg_loss
+                    total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
-        # Head pose loss
-        if 'headpose_output' in predictions and predictions['headpose_output'].shape[0] > 0:
-            pose_pred = predictions['headpose_output']
-            pose_indices = (task_ids == 2).nonzero(as_tuple=True)[0]
-            if 'headpose' in labels and len(pose_indices) > 0:
-                pose_target = labels['headpose'][pose_indices].to(device)
+        # Landmark loss - full batch with masking
+        if 'landmark_output' in predictions:
+            lm_pred = predictions['landmark_output']  # [B, 136]
+            if 'landmark' in labels:
+                lm_target = labels['landmark'].to(device)  # [B, 136]
                 
-                # Handle batch size mismatch
-                if pose_pred.shape[0] != pose_target.shape[0]:
-                    min_batch = min(pose_pred.shape[0], pose_target.shape[0])
-                    pose_pred = pose_pred[:min_batch]
-                    pose_target = pose_target[:min_batch]
+                # Create mask for landmark samples (task_id=1)
+                lm_mask = (task_ids == 1).unsqueeze(-1)  # [B, 1]
                 
-                pose_loss = self.l1_loss(pose_pred, pose_target)
-                losses['hpe'] = pose_loss
-                weighted_loss = self.loss_weights['hpe'] * pose_loss
-                total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+                if lm_mask.any():
+                    # Compute L1 loss only on landmark samples
+                    lm_loss = self.l1_loss(lm_pred * lm_mask, lm_target * lm_mask) / lm_mask.sum().clamp(min=1.0)
+                    
+                    losses['ind'] = lm_loss
+                    weighted_loss = self.loss_weights['ind'] * lm_loss
+                    total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+        
+        # Head pose loss - full batch with masking
+        if 'headpose_output' in predictions:
+            pose_pred = predictions['headpose_output']  # [B, 3]
+            if 'headpose' in labels:
+                pose_target = labels['headpose'].to(device)  # [B, 3]
+                
+                # Create mask for head pose samples (task_id=2)
+                pose_mask = (task_ids == 2).unsqueeze(-1)  # [B, 1]
+                
+                if pose_mask.any():
+                    # Compute L1 loss only on head pose samples
+                    pose_loss = self.l1_loss(pose_pred * pose_mask, pose_target * pose_mask) / pose_mask.sum().clamp(min=1.0)
+                    
+                    losses['hpe'] = pose_loss
+                    weighted_loss = self.loss_weights['hpe'] * pose_loss
+                    total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
         # Attribute loss
         if 'attribute_output' in predictions and predictions['attribute_output'].shape[0] > 0:
@@ -194,8 +203,10 @@ class MultiTaskLoss(nn.Module):
                 
                 # Age can be regression or classification
                 if age_target.dtype in [torch.long, torch.int]:
+                    # Clamp to valid range to prevent CUDA device-side asserts
                     age_target = torch.clamp(age_target.long(), 0, 7)  # 8 age groups (0-7)
-                    age_loss = self.ce_loss(age_pred, age_target)
+                    # Use F.cross_entropy with ignore_index for robustness
+                    age_loss = F.cross_entropy(age_pred, age_target, ignore_index=-1)
                 else:
                     age_loss = self.l1_loss(age_pred, age_target.float())
                 
@@ -216,8 +227,10 @@ class MultiTaskLoss(nn.Module):
                     gender_pred = gender_pred[:min_batch]
                     gender_target = gender_target[:min_batch]
                 
+                # Clamp to valid range to prevent CUDA device-side asserts
                 gender_target = torch.clamp(gender_target.long(), 0, 1)  # 2 classes
-                gender_loss = self.ce_loss(gender_pred, gender_target)
+                # Use F.cross_entropy with ignore_index for robustness
+                gender_loss = F.cross_entropy(gender_pred, gender_target, ignore_index=-1)
                 
                 losses['gender'] = gender_loss
                 weighted_loss = self.loss_weights['g/r'] * gender_loss * 0.5
@@ -236,8 +249,10 @@ class MultiTaskLoss(nn.Module):
                     race_pred = race_pred[:min_batch]
                     race_target = race_target[:min_batch]
                 
+                # Clamp to valid range to prevent CUDA device-side asserts
                 race_target = torch.clamp(race_target.long(), 0, 4)  # 5 classes
-                race_loss = self.ce_loss(race_pred, race_target)
+                # Use F.cross_entropy with ignore_index for robustness
+                race_loss = F.cross_entropy(race_pred, race_target, ignore_index=-1)
                 
                 losses['race'] = race_loss
                 weighted_loss = self.loss_weights['g/r'] * race_loss * 0.5

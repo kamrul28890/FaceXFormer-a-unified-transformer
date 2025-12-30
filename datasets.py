@@ -24,10 +24,20 @@ from PIL import Image
 from pathlib import Path
 import pickle
 import pandas as pd
+import time
+
+# Import config for metadata checking
+try:
+    from config import config
+except ImportError:
+    # Fallback if config not available during import
+    config = None
 
 
-def simple_augmentation(image, target_size=224):
+def simple_augmentation(image, target_size=None):
     """Simple augmentation: resize and normalize."""
+    if target_size is None:
+        target_size = config.IMG_SIZE if config else 224
     image = image.resize((target_size, target_size), Image.BILINEAR)
     image = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
     # ImageNet normalization
@@ -256,13 +266,17 @@ def multi_task_collate_fn(batch):
             else:
                 # Create dummy tensor of appropriate shape
                 if key == 'segmentation':
-                    values.append(torch.zeros(224, 224, dtype=torch.long))
+                    img_size = config.IMG_SIZE if config else 224
+                    values.append(torch.zeros(img_size, img_size, dtype=torch.long))
                 elif key == 'landmark':
-                    values.append(torch.zeros(136))
+                    landmark_dim = config.LANDMARK_DIM if config else 136
+                    values.append(torch.zeros(landmark_dim))
                 elif key == 'headpose':
-                    values.append(torch.zeros(3))
+                    headpose_dim = config.HEADPOSE_DIM if config else 3
+                    values.append(torch.zeros(headpose_dim))
                 elif key == 'attribute':
-                    values.append(torch.zeros(40))
+                    attribute_dim = config.ATTRIBUTE_DIM if config else 40
+                    values.append(torch.zeros(attribute_dim))
                 elif key == 'age':
                     values.append(torch.tensor(0, dtype=torch.long))
                 elif key == 'gender':
@@ -270,7 +284,8 @@ def multi_task_collate_fn(batch):
                 elif key == 'race':
                     values.append(torch.tensor(0, dtype=torch.long))
                 elif key == 'visibility':
-                    values.append(torch.zeros(29))  # 29 landmark visibility values
+                    visibility_dim = config.VISIBILITY_DIM if config else 29
+                    values.append(torch.zeros(visibility_dim))
                 elif key == 'task_id':
                     values.append(torch.tensor(-1, dtype=torch.long))
                 else:
@@ -407,7 +422,7 @@ class TaskDataset(Dataset):
         self.task_name = task_name
         self.split = split
         self.dataset_root = Path(dataset_root)
-        self.target_size = 224
+        self.target_size = config.IMG_SIZE if config else 224
         self.data = []
     
     def __len__(self):
@@ -439,12 +454,18 @@ class CelebAMaskHQDataset(TaskDataset):
             mask_file = mask_folder / f'{img_idx:05d}_{label_name}.png'
             if mask_file.exists():
                 label_mask = np.array(Image.open(mask_file).convert('L'))
-                mask[label_mask == 255] = min(i, 10)  # Limit to 11 classes (0-10)
+                # Limit to SEGMENTATION_CLASSES (0 to SEGMENTATION_CLASSES-1)
+                max_class = (config.SEGMENTATION_CLASSES - 1) if config else 10
+                mask[label_mask == 255] = min(i, max_class)
         
-        # Resize
+        # Resize image and mask to IMG_SIZE
         image = simple_augmentation(image, self.target_size)
+        # Segmentation output is upsampled to IMG_SIZE in model forward pass
         mask = np.array(Image.fromarray(mask.astype(np.uint8)).resize((self.target_size, self.target_size), Image.NEAREST))
         mask = torch.from_numpy(mask).long()
+        # Clamp to valid range [0, SEGMENTATION_CLASSES-1] to prevent CUDA device-side asserts
+        max_class_idx = (config.SEGMENTATION_CLASSES - 1) if config else 10
+        mask = torch.clamp(mask, 0, max_class_idx)
         
         return (image, {'segmentation': mask, 'task_id': torch.tensor(0)})
 
@@ -518,42 +539,106 @@ class W300LPDataset(TaskDataset):
 
 class CelebADataset(TaskDataset):
     """CelebA for attributes. Maps to task 3."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='../facexformer-my/datasets', rank=0, world_size=1):
         super().__init__('CelebA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebA'
+        self.rank = rank
+        self.world_size = world_size
+        self.is_master = rank == 0
         cache_file = self.data_root / f'celeba_{split}_cache.pkl'
         
         if cache_file.exists():
-            with open(cache_file, 'rb') as f:
-                cached = pickle.load(f)
-                self.data = cached['data']
-                self.attributes = cached['attributes']
+            # Check cache metadata for compatibility
+            try:
+                with open(cache_file, 'rb') as f:
+                    cached = pickle.load(f)
+                    meta = cached.get('meta', {})
+                    
+                    # Check if cache metadata matches current config
+                    cache_valid = True
+                    if meta.get('img_size') != config.IMG_SIZE:
+                        cache_valid = False
+                        if self.is_master:
+                            print(f"Cache {cache_file} img_size={meta.get('img_size')} != config.IMG_SIZE={config.IMG_SIZE}; rebuilding")
+                    
+                    if cache_valid:
+                        self.data = cached['data']
+                        self.attributes = cached['attributes']
+                    else:
+                        # Force rebuild by removing cache file
+                        if self.is_master:
+                            cache_file.unlink(missing_ok=True)
+                        raise ValueError("Cache metadata mismatch")
+            except (KeyError, ValueError):
+                # Cache is invalid or missing metadata, rebuild it
+                if self.is_master:
+                    cache_file.unlink(missing_ok=True)
+                # Fall through to rebuild logic
+                pass
         else:
-            attr_file = self.data_root / 'list_attr_celeba.csv'
-            split_file = self.data_root / 'list_eval_partition.csv'
-            self.data = []
-            self.attributes = []
+            # Cache doesn't exist, will be built below
+            pass
+        
+        # Re-check if cache exists after potential removal
+        if not cache_file.exists():
+            # Only master process builds cache in distributed training
+            if self.is_master:
+                attr_file = self.data_root / 'list_attr_celeba.csv'
+                split_file = self.data_root / 'list_eval_partition.csv'
+                self.data = []
+                self.attributes = []
+                
+                if attr_file.exists() and split_file.exists():
+                    attr_df = pd.read_csv(attr_file)
+                    split_df = pd.read_csv(split_file)
+                    merged = attr_df.merge(split_df, on='image_id')
+                    filtered = merged[merged['partition'] == (0 if split == 'train' else 2)]
+                    attr_cols = [col for col in attr_df.columns if col != 'image_id']
+                    
+                    img_dir1 = self.data_root / 'img_align_celeba'
+                    img_dir2 = img_dir1 / 'img_align_celeba'
+                    img_dir = img_dir2 if img_dir2.exists() else img_dir1
+                    
+                    for i, (img_name, attr_values) in enumerate(zip(filtered['image_id'].values, filtered[attr_cols].values)):
+                        img_path = img_dir / img_name
+                        if img_path.exists():
+                            self.data.append(img_path)
+                            attrs = ((attr_values + 1) // 2).tolist()
+                            self.attributes.append(attrs)
+                    
+                    # Save cache with metadata
+                    cache_data = {
+                        'data': self.data,
+                        'attributes': self.attributes,
+                        'meta': {
+                            'img_size': config.IMG_SIZE,
+                            'cache_version': '1.0',
+                            'created_by': f'rank_{self.rank}'
+                        }
+                    }
+                    with open(cache_file, 'wb') as f:
+                        pickle.dump(cache_data, f)
             
-            if attr_file.exists() and split_file.exists():
-                attr_df = pd.read_csv(attr_file)
-                split_df = pd.read_csv(split_file)
-                merged = attr_df.merge(split_df, on='image_id')
-                filtered = merged[merged['partition'] == (0 if split == 'train' else 2)]
-                attr_cols = [col for col in attr_df.columns if col != 'image_id']
+            # In distributed training, non-master processes wait for cache
+            if self.world_size > 1 and not self.is_master:
+                cache_poll_timeout = 2 * 60 * 60.0  # 2 hours
+                cache_poll_interval = 5.0  # Check every 5 seconds
+                start_time = time.time()
                 
-                img_dir1 = self.data_root / 'img_align_celeba'
-                img_dir2 = img_dir1 / 'img_align_celeba'
-                img_dir = img_dir2 if img_dir2.exists() else img_dir1
+                while not cache_file.exists():
+                    elapsed = time.time() - start_time
+                    if elapsed >= cache_poll_timeout:
+                        raise TimeoutError(f"Timeout waiting for cache file {cache_file} after {cache_poll_timeout}s")
+                    time.sleep(cache_poll_interval)
                 
-                for i, (img_name, attr_values) in enumerate(zip(filtered['image_id'].values, filtered[attr_cols].values)):
-                    img_path = img_dir / img_name
-                    if img_path.exists():
-                        self.data.append(img_path)
-                        attrs = ((attr_values + 1) // 2).tolist()
-                        self.attributes.append(attrs)
-                
-                with open(cache_file, 'wb') as f:
-                    pickle.dump({'data': self.data, 'attributes': self.attributes}, f)
+                # Load from cache and validate metadata
+                with open(cache_file, 'rb') as f:
+                    cached = pickle.load(f)
+                    meta = cached.get('meta', {})
+                    if meta.get('img_size') != config.IMG_SIZE:
+                        raise ValueError(f"Cache metadata mismatch: img_size {meta.get('img_size')} != {config.IMG_SIZE}")
+                    self.data = cached['data']
+                    self.attributes = cached['attributes']
         
         if len(self.data) == 0:
             raise FileNotFoundError(f"CelebA not found at {self.data_root}")

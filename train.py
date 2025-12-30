@@ -43,8 +43,18 @@ def setup_distributed():
         print("Not using distributed mode")
         return 0, 1, 0
     
+    # Set device to the specific GPU assigned to this process
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend='nccl', init_method='env://')
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # Initialize process group with explicit device_id to avoid NCCL warnings
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://',
+        world_size=world_size,
+        rank=rank,
+        device_id=device  # Explicitly specify device for NCCL communication
+    )
     dist.barrier()
     
     return rank, world_size, local_rank
@@ -259,8 +269,8 @@ def main():
         
         if rank == 0:
             print("  Loading CelebA (may take a while for first run)...")
-        celeba_train = CelebADataset('train')
-        celeba_test = CelebADataset('test')
+        celeba_train = CelebADataset('train', rank=rank, world_size=world_size)
+        celeba_test = CelebADataset('test', rank=rank, world_size=world_size)
         
         if rank == 0:
             print("  Loading UTKFace...")

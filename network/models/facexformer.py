@@ -126,6 +126,8 @@ class FaceDecoder(nn.Module):
         b, c, h, w = upscaled_embedding.shape
         seg_output = (hyper_in @ upscaled_embedding.view(b, c, h * w)).view(b, -1, h, w)
         
+        # Upsample segmentation output to 224x224 (paper mentions upsampling for segmentation)
+        seg_output = F.interpolate(seg_output, size=(224, 224), mode='bilinear', align_corners=False)
         
         return landmark_output, headpose_output, attribute_output, visibility_output, age_output, gender_output, race_output, seg_output
 
@@ -265,24 +267,6 @@ class FaceXFormer(nn.Module):
                 image_pe=image_pe
             )
         
-        segmentation_indices = (tasks == 0)
-        seg_output = seg_output[segmentation_indices]
-        
-        landmarks_indices = (tasks == 1)
-        landmark_output = landmark_output[landmarks_indices]
-
-        headpose_indices = (tasks == 2)
-        headpose_output = headpose_output[headpose_indices]
-        
-        attribute_indices = (tasks == 3)
-        attribute_output = attribute_output[attribute_indices]
-
-        age_indices = (tasks == 4)
-        age_output = age_output[age_indices]
-        gender_output = gender_output[age_indices]
-        race_output = race_output[age_indices]
-        
-        visibility_indices = (tasks == 5)
-        visibility_output = visibility_output[visibility_indices]
-    
+        # For DDP consistency, always return all outputs regardless of task filtering
+        # The loss function will handle which outputs to use based on available labels
         return landmark_output, headpose_output, attribute_output, visibility_output, age_output, gender_output, race_output, seg_output
