@@ -142,19 +142,19 @@ class Config:
     # ============================================================================
     # MANUAL OVERRIDE: To manually set batch size, uncomment these lines:
     # ============================================================================
-    # BATCH_SIZE = 96  # Per-GPU batch size
-    # LEARNING_RATE = 2e-4  # Base learning rate
-    # GRADIENT_CHECKPOINTING = False
-    # _manual_override = True
+    BATCH_SIZE = 96  # Per-GPU batch size
+    LEARNING_RATE = 1e-4  # learning rate (AdamW optimizer, 1e-4*sqrt(total_batch/384))
+    GRADIENT_CHECKPOINTING = False
+    _manual_override = True
     
     # ============================================================================
     # AUTO-CONFIGURATION: Comment this section if using manual override above
     # ============================================================================
-    _auto_config = auto_configure_batch_size()
-    BATCH_SIZE = _auto_config['batch_size']
-    LEARNING_RATE = _auto_config['learning_rate']
-    GRADIENT_CHECKPOINTING = _auto_config['gradient_checkpointing']
-    _manual_override = False
+    # _auto_config = auto_configure_batch_size()
+    # BATCH_SIZE = _auto_config['batch_size']
+    # LEARNING_RATE = _auto_config['learning_rate']
+    # GRADIENT_CHECKPOINTING = _auto_config['gradient_checkpointing']
+    # _manual_override = False
     
     NUM_EPOCHS = 12
     WEIGHT_DECAY = 1e-5
