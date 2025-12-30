@@ -84,13 +84,19 @@ def train_one_epoch(
     total_loss = 0.0
     task_losses = {}
     
+    import time
+    batch_times = []
+    
     if rank == 0:
         print(f"Starting epoch {epoch} training with {len(dataloader)} batches...")
-        pbar = tqdm(dataloader, desc=f'Epoch {epoch} [Train]')
+        pbar = tqdm(dataloader, desc=f'Epoch {epoch} [Train]', ncols=100, 
+                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
     else:
         pbar = dataloader
     
     for batch_idx, (images, targets) in enumerate(pbar):
+        batch_start = time.time()
+        
         if rank == 0 and batch_idx == 0:
             print(f"[rank{rank}] Loading first batch...")
         images = images.to(device)
@@ -156,9 +162,21 @@ def train_one_epoch(
                 task_losses[task_name] = 0.0
             task_losses[task_name] += task_loss.item()
         
+        batch_time = time.time() - batch_start
+        batch_times.append(batch_time)
+        
         # Update progress bar
         if rank == 0:
-            pbar.set_postfix({'loss': loss.item()})
+            avg_batch_time = sum(batch_times[-10:]) / len(batch_times[-10:])  # Last 10 batches
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'batch_time': f'{batch_time:.2f}s',
+                'avg_time': f'{avg_batch_time:.2f}s'
+            })
+            
+            # Print every 10 batches for visibility
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  Batch {batch_idx + 1}/{len(dataloader)}: loss={loss.item():.4f}, time={batch_time:.2f}s")
     
     # Average losses
     avg_loss = total_loss / len(dataloader)
