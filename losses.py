@@ -150,7 +150,7 @@ class MultiTaskLoss(nn.Module):
                     total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
         # =====================================================================
-        # 2. LANDMARK LOSS (L_ind = L1)
+        # 2. LANDMARK LOSS (L_ind = STAR loss)
         # =====================================================================
         if 'landmark_output' in predictions:
             lm_pred = predictions['landmark_output']  # [B, 136]
@@ -160,11 +160,27 @@ class MultiTaskLoss(nn.Module):
                 lm_mask = (task_ids == 1)
                 
                 if lm_mask.any():
-                    lm_pred_masked = lm_pred[lm_mask]
-                    lm_target_masked = lm_target[lm_mask]
+                    lm_pred_masked = lm_pred[lm_mask]  # [N, 136]
+                    lm_target_masked = lm_target[lm_mask]  # [N, 136]
                     
-                    # Normalize by image size for stability
-                    lm_loss = self.l1_loss(lm_pred_masked / 224.0, lm_target_masked / 224.0)
+                    # STAR loss (Self-adapTive Ambiguity Reduction)
+                    # More robust than Wing loss for occluded landmarks
+                    # Reshape to [N, 68, 2] for per-landmark loss
+                    lm_pred_pts = lm_pred_masked.view(-1, 68, 2)
+                    lm_target_pts = lm_target_masked.view(-1, 68, 2)
+                    
+                    # Compute Euclidean distance per landmark
+                    diff = lm_pred_pts - lm_target_pts
+                    distances = torch.sqrt((diff ** 2).sum(dim=2) + 1e-6)  # [N, 68]
+                    
+                    # STAR loss: smooth L1-like formulation
+                    # More robust to outliers than pure L2
+                    star_loss = torch.where(
+                        distances < 1.0,
+                        0.5 * distances ** 2,
+                        distances - 0.5
+                    )
+                    lm_loss = star_loss.mean()  # Average over all landmarks and samples
                     
                     if self._check_for_anomalies(lm_loss, "landmark_loss"):
                         lm_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -174,21 +190,69 @@ class MultiTaskLoss(nn.Module):
                     total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
         
         # =====================================================================
-        # 3. HEAD POSE LOSS (L_hpe = L1 on Euler angles)
+        # 3. HEAD POSE LOSS (L_hpe = Geodesic loss on SO(3))
         # =====================================================================
         if 'headpose_output' in predictions:
-            pose_pred = predictions['headpose_output']  # [B, 3]
+            pose_pred = predictions['headpose_output']  # [B, 3] Euler angles
             
             if 'headpose' in labels:
-                pose_target = labels['headpose'].to(device)  # [B, 3]
+                pose_target = labels['headpose'].to(device)  # [B, 3] Euler angles
                 pose_mask = (task_ids == 2)
                 
                 if pose_mask.any():
                     pose_pred_masked = pose_pred[pose_mask]
                     pose_target_masked = pose_target[pose_mask]
                     
-                    # Normalize by π for stability
-                    pose_loss = self.l1_loss(pose_pred_masked / math.pi, pose_target_masked / math.pi)
+                    # Convert Euler angles (yaw, pitch, roll) to rotation matrices
+                    def euler_to_rotation_matrix(euler):
+                        """Convert Euler angles to rotation matrix.
+                        euler: [N, 3] (yaw, pitch, roll) in radians
+                        Returns: [N, 3, 3] rotation matrices
+                        """
+                        yaw, pitch, roll = euler[:, 0], euler[:, 1], euler[:, 2]
+                        
+                        # Rotation around Z-axis (yaw)
+                        cos_yaw, sin_yaw = torch.cos(yaw), torch.sin(yaw)
+                        Rz = torch.stack([
+                            torch.stack([cos_yaw, -sin_yaw, torch.zeros_like(yaw)], dim=1),
+                            torch.stack([sin_yaw, cos_yaw, torch.zeros_like(yaw)], dim=1),
+                            torch.stack([torch.zeros_like(yaw), torch.zeros_like(yaw), torch.ones_like(yaw)], dim=1)
+                        ], dim=1)  # [N, 3, 3]
+                        
+                        # Rotation around Y-axis (pitch)
+                        cos_pitch, sin_pitch = torch.cos(pitch), torch.sin(pitch)
+                        Ry = torch.stack([
+                            torch.stack([cos_pitch, torch.zeros_like(pitch), sin_pitch], dim=1),
+                            torch.stack([torch.zeros_like(pitch), torch.ones_like(pitch), torch.zeros_like(pitch)], dim=1),
+                            torch.stack([-sin_pitch, torch.zeros_like(pitch), cos_pitch], dim=1)
+                        ], dim=1)  # [N, 3, 3]
+                        
+                        # Rotation around X-axis (roll)
+                        cos_roll, sin_roll = torch.cos(roll), torch.sin(roll)
+                        Rx = torch.stack([
+                            torch.stack([torch.ones_like(roll), torch.zeros_like(roll), torch.zeros_like(roll)], dim=1),
+                            torch.stack([torch.zeros_like(roll), cos_roll, -sin_roll], dim=1),
+                            torch.stack([torch.zeros_like(roll), sin_roll, cos_roll], dim=1)
+                        ], dim=1)  # [N, 3, 3]
+                        
+                        # Combined rotation: R = Rz @ Ry @ Rx
+                        R = torch.matmul(torch.matmul(Rz, Ry), Rx)
+                        return R
+                    
+                    # Get rotation matrices
+                    R_pred = euler_to_rotation_matrix(pose_pred_masked)  # [N, 3, 3]
+                    R_target = euler_to_rotation_matrix(pose_target_masked)  # [N, 3, 3]
+                    
+                    # Compute geodesic distance on SO(3)
+                    # d(R1, R2) = arccos((trace(R1^T @ R2) - 1) / 2)
+                    R_diff = torch.matmul(R_pred.transpose(1, 2), R_target)  # [N, 3, 3]
+                    trace = R_diff.diagonal(dim1=1, dim2=2).sum(dim=1)  # [N]
+                    
+                    # Clamp to avoid numerical issues with arccos
+                    trace_clamped = torch.clamp((trace - 1.0) / 2.0, -1.0 + 1e-7, 1.0 - 1e-7)
+                    geodesic_dist = torch.acos(trace_clamped)  # [N]
+                    
+                    pose_loss = geodesic_dist.mean()
                     
                     if self._check_for_anomalies(pose_loss, "headpose_loss"):
                         pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -240,7 +304,8 @@ class MultiTaskLoss(nn.Module):
                     age_ce = F.cross_entropy(age_pred_masked, age_target_masked, reduction='mean')
                     
                     # Regression loss (L1)
-                    age_bins = torch.tensor([1, 5, 10, 17, 28, 40, 50, 65], 
+                    # Age bins (from authors): 0-9, 10-19, 20-29, 30-39, 40-49, 50-59, 60-69, 70+
+                    age_bins = torch.tensor([4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0], 
                                            device=device, dtype=torch.float32)
                     age_gt_value = age_bins[age_target_masked]
                     age_probs = F.softmax(age_pred_masked, dim=1)

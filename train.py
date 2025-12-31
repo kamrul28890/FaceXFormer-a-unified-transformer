@@ -13,6 +13,7 @@ Features:
 from typing import Dict
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -288,17 +289,47 @@ def compute_nme(predictions, ground_truth, image_size=224):
     return nme
 
 
+def compute_age_from_logits(age_logits):
+    """
+    Convert age classification logits to continuous age predictions.
+    
+    Args:
+        age_logits: [B, 8] tensor of logits for 8 age buckets
+    
+    Returns:
+        [B] tensor of predicted ages
+    """
+    # Age bucket centers (from authors): 0-9, 10-19, 20-29, 30-39, 40-49, 50-59, 60-69, 70+
+    age_bins = torch.tensor([4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0], 
+                           device=age_logits.device, dtype=torch.float32)
+    
+    # Weighted average of bin centers using softmax probabilities
+    age_probs = F.softmax(age_logits, dim=1)  # [B, 8]
+    predicted_ages = (age_probs * age_bins).sum(dim=1)  # [B]
+    
+    return predicted_ages
+
+
 def compute_mae(predictions, ground_truth):
     """
     Compute Mean Absolute Error.
     
     Args:
-        predictions: tensor
-        ground_truth: tensor
+        predictions: tensor - can be [B], [B, 1], or [B, C] (for age logits)
+        ground_truth: tensor - should be [B] or [B, 1]
     
     Returns:
         float: MAE value
     """
+    # Handle age logits [B, 8] - convert to continuous predictions
+    if len(predictions.shape) == 2 and predictions.shape[1] == 8:
+        predictions = compute_age_from_logits(predictions)
+    elif len(predictions.shape) > 1:
+        predictions = predictions.squeeze()
+    
+    if len(ground_truth.shape) > 1:
+        ground_truth = ground_truth.squeeze()
+    
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
     
@@ -569,7 +600,8 @@ def validate_per_dataset(
                     
                     elif task_name == 'age':
                         if 'age' in targets:
-                            metric = compute_mae(age_out.squeeze(), targets['age'].float())
+                            # age_out is [B, 8] logits, compute_mae will convert to continuous
+                            metric = compute_mae(age_out, targets['age'].float())
                             dataset_metric += metric
                     
                     elif task_name == 'gender':

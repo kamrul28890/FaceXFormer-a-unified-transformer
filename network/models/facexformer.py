@@ -7,7 +7,7 @@ from typing import Any, Optional, Tuple, Type
 from torchvision.models import swin_b
 from .transformer import TwoWayTransformer, LayerNorm2d
 
-class MLP(nn.Module):
+class MLP(nn.Module):  # regular MLP
     def __init__(
         self,
         input_dim: int,
@@ -32,6 +32,7 @@ class MLP(nn.Module):
         return x
     
 class FaceDecoder(nn.Module):
+    # Decoder along with task-specific heads
     def __init__(
         self,
         *,
@@ -44,6 +45,7 @@ class FaceDecoder(nn.Module):
         self.transformer_dim = transformer_dim
         self.transformer = transformer
 
+        # most probably defining task tokens
         self.landmarks_token = nn.Embedding(1, transformer_dim)
         self.pose_token = nn.Embedding(1, transformer_dim)
         self.attribute_token = nn.Embedding(1, transformer_dim)
@@ -53,7 +55,7 @@ class FaceDecoder(nn.Module):
         self.race_token = nn.Embedding(1, transformer_dim)
         self.mask_tokens = nn.Embedding(11, transformer_dim)
         
-
+        # used only to upsample the segmentation mask
         self.output_upscaling = nn.Sequential(
             nn.ConvTranspose2d(transformer_dim, transformer_dim // 4, kernel_size=2, stride=2),
             LayerNorm2d(transformer_dim // 4),
@@ -66,6 +68,7 @@ class FaceDecoder(nn.Module):
             transformer_dim, transformer_dim, transformer_dim // 8, 3
             )
                 
+        # now defining individual task heads
         self.landmarks_prediction_head = MLP(
             transformer_dim, transformer_dim, 136, 3
         )
@@ -93,7 +96,8 @@ class FaceDecoder(nn.Module):
         image_embeddings: torch.Tensor,
         image_pe: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        output_tokens = torch.cat([self.landmarks_token.weight, self.pose_token.weight, self.attribute_token.weight, self.visibility_token.weight, self.age_token.weight, self.gender_token.weight, self.race_token.weight,self.mask_tokens.weight], dim=0) 
+        output_tokens = torch.cat([self.landmarks_token.weight, self.pose_token.weight, self.attribute_token.weight, self.visibility_token.weight, self.age_token.weight, self.gender_token.weight, self.race_token.weight,self.mask_tokens.weight], dim=0)
+         
         tokens = output_tokens.unsqueeze(0).expand(image_embeddings.size(0), -1, -1)
 
         src = image_embeddings
@@ -120,6 +124,7 @@ class FaceDecoder(nn.Module):
         gender_output = self.gender_prediction_head(gender_token_out)
         race_output = self.race_prediction_head(race_token_out)
         
+        # for segmentation output
         src = src.transpose(1, 2).view(b, c, h, w) 
         upscaled_embedding = self.output_upscaling(src)  
         hyper_in = self.output_hypernetwork_mlps(mask_token_out)
@@ -179,7 +184,7 @@ class PositionEmbeddingRandom(nn.Module):
 class FaceXFormerMLP(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
-        self.proj = nn.Linear(input_dim, 256)
+        self.proj = nn.Linear(input_dim, 256)  # only one linear layer
 
     def forward(self, hidden_states: torch.Tensor):
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
@@ -256,6 +261,7 @@ class FaceXFormer(nn.Module):
             )
             all_hidden_states += (encoder_hidden_state,)
         
+        # fusing features from multi-scale encoder (MLP fusion)
         fused_states = self.linear_fuse(torch.cat(all_hidden_states[::-1], dim=1))
         image_pe = self.pe_layer((fused_states.shape[2], fused_states.shape[3])).unsqueeze(0)
         

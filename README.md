@@ -506,6 +506,91 @@ If you use this code, please cite the original FaceXFormer paper:
 }
 ```
 
+## Age Classification Details
+
+Age is predicted as an 8-class classification task with the following bucket structure:
+
+### Age Buckets
+
+| Class Index | Age Range | Representative Value |
+|-------------|-----------|---------------------|
+| 0 | 0-9 years | 4.5 |
+| 1 | 10-19 years | 14.5 |
+| 2 | 20-29 years | 24.5 |
+| 3 | 30-39 years | 34.5 |
+| 4 | 40-49 years | 44.5 |
+| 5 | 50-59 years | 54.5 |
+| 6 | 60-69 years | 64.5 |
+| 7 | 70+ years | 75.0 |
+
+### Loss Function
+
+Age loss combines classification and regression:
+- **Classification Loss**: Cross-entropy on 8 classes
+- **Regression Loss**: L1 loss using representative values (normalized to [0,1])
+- **Final Loss**: L_a = mean(CE + normalized_L1)
+
+### Dataset Handling
+
+- **UTKFace**: Continuous ages (0-116) are automatically binned into the 8 buckets
+- **FairFace**: String labels ('0-2', '10-19', etc.) are mapped to bucket indices
+- **Conversion**: The `age_to_bucket()` helper in [datasets.py](datasets.py) handles the bucketing logic
+
+### Evaluation Metrics
+
+- **MAE (Mean Absolute Error)**: Computed by converting predicted class probabilities to continuous age using weighted average with representative values
+- **Accuracy**: Percentage of correctly classified age buckets
+
+## Loss Functions
+
+The loss function follows the paper formulation (excluding expression and face recognition):
+
+### Task-Specific Losses
+
+1. **Face Parsing (L_seg)**:
+   - Combination: mean(Dice Loss + Cross Entropy)
+   - Applied to: CelebAMask-HQ (11 classes)
+
+2. **Landmark Detection (L_ind)**:
+   - **STAR Loss**: Smooth L1-like formulation
+   - More robust to outliers than L2
+   - Formula: STAR(d) = 0.5 * d² if d < 1, else d - 0.5
+   - Applied to: 300W (68 landmarks)
+
+3. **Head Pose Estimation (L_hpe)**:
+   - **Geodesic Loss** on SO(3) rotation group
+   - Converts Euler angles to rotation matrices
+   - Computes: d(R₁, R₂) = arccos((trace(R₁ᵀR₂) - 1) / 2)
+   - More geometrically meaningful than L1 on Euler angles
+   - Applied to: 300W-LP (yaw, pitch, roll)
+
+4. **Attributes (L_attr)**:
+   - Binary Cross Entropy with Logits
+   - Applied to: CelebA (40 binary attributes)
+
+5. **Age (L_a)**:
+   - Combination: mean(L1 + Cross Entropy)
+   - L1: Normalized regression on representative values
+   - CE: 8-class classification
+   - Applied to: UTKFace, FairFace
+
+6. **Gender/Race (L_g, L_r)**:
+   - Cross Entropy Loss
+   - Gender: 2 classes (Male/Female)
+   - Race: 5 classes (White, Black, Asian, Indian, Others)
+   - Applied to: UTKFace, FairFace
+
+7. **Visibility (L_vis)**:
+   - Binary Cross Entropy with Logits
+   - Element-wise filtering for valid landmarks
+   - Applied to: COFW (29 landmark visibility scores)
+
+### Total Loss
+
+L_total = w_seg × L_seg + w_ind × L_ind + w_hpe × L_hpe + w_attr × L_attr + w_a × L_a + w_g × L_g + w_r × L_r + w_vis × L_vis
+
+Loss weights are configured in [config.py](config.py).
+
 ## License
 
 This implementation follows the license of the original facexformer-main repository.
