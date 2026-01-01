@@ -373,15 +373,16 @@ def compute_accuracy(predictions, ground_truth):
     Returns:
         float: accuracy
     """
-    if len(predictions.shape) > 2:  # Multi-class classification
-        pred_classes = torch.argmax(predictions, dim=1)
-    else:  # Multi-label or binary
-        if predictions.shape[1] > 1:  # Multi-label (attributes)
-            pred_classes = (torch.sigmoid(predictions) > 0.5).float()
-            # For multi-label, compute average accuracy across attributes
-            correct = (pred_classes == ground_truth).float().mean()
-            return correct.item()
-        else:  # Binary classification
+    # Check if it's multi-label (ground_truth is 2D)
+    if len(ground_truth.shape) > 1 and ground_truth.shape[1] > 1:  # Multi-label (attributes)
+        pred_classes = (torch.sigmoid(predictions) > 0.5).float()
+        # For multi-label, compute average accuracy across attributes
+        correct = (pred_classes == ground_truth).float().mean()
+        return correct.item()
+    else:  # Multi-class or binary classification (ground_truth is 1D class indices)
+        if predictions.shape[1] > 1:  # Multi-class (gender, race, age, etc.)
+            pred_classes = torch.argmax(predictions, dim=1)
+        else:  # Binary classification (single logit)
             pred_classes = (torch.sigmoid(predictions) > 0.5).long().squeeze()
     
     pred_classes = pred_classes.cpu().numpy()

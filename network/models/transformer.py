@@ -87,7 +87,7 @@ class TwoWayTransformer(nn.Module):
 
         self.final_attn_token_to_image = Attention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
-        )
+        )  # token to face cross attention in unified head
         self.norm_final_attn = nn.LayerNorm(embedding_dim)
 
     def forward(
@@ -161,12 +161,12 @@ class TwoWayAttentionBlock(nn.Module):
           skip_first_layer_pe (bool): skip the PE on the first layer
         """
         super().__init__()
-        self.self_attn = Attention(embedding_dim, num_heads)
+        self.self_attn = Attention(embedding_dim, num_heads) # task self-attention
         self.norm1 = nn.LayerNorm(embedding_dim)
 
         self.cross_attn_token_to_image = Attention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
-        )
+        )  # token to face cross attention
         self.norm2 = nn.LayerNorm(embedding_dim)
 
         self.mlp = MLPBlock(embedding_dim, mlp_dim, activation)
@@ -175,14 +175,17 @@ class TwoWayAttentionBlock(nn.Module):
         self.norm4 = nn.LayerNorm(embedding_dim)
         self.cross_attn_image_to_token = Attention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
-        )
+        ) # face to token cross attention
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
     def forward(
         self, queries: Tensor, keys: Tensor, query_pe: Tensor, key_pe: Tensor
     ) -> Tuple[Tensor, Tensor]:
-        # Self attention block
+        # queries: task tokens
+        # keys: face tokens
+
+        # Task self-attention block
         if self.skip_first_layer_pe:
             queries = self.self_attn(q=queries, k=queries, v=queries)
         else:
@@ -212,7 +215,7 @@ class TwoWayAttentionBlock(nn.Module):
         keys = keys + attn_out
         keys = self.norm4(keys)
 
-        return queries, keys
+        return queries, keys  # modified task tokens (queries) and face tokens (keys)
 
 
 class Attention(nn.Module):
