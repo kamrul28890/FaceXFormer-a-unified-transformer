@@ -1,3 +1,5 @@
+# use this file if you downnload the model weights from Huggingface
+
 """
 Face Parsing - Task 0
 Face Landmarks Detection - Task 1
@@ -124,18 +126,7 @@ def test(args):
     model = FaceXFormer().to(device)
     weights_path = args.model_path
     checkpoint = torch.load(weights_path, map_location=device)
-    
-    # Handle DDP vs non-DDP checkpoint
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
-    
-    # Remove 'module.' prefix if present (from DDP)
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k.replace('module.', '')  # remove 'module.' prefix
-        new_state_dict[name] = v
-    
-    model.load_state_dict(new_state_dict)
+    model.load_state_dict(checkpoint['state_dict_backbone'])
 
     model.eval()
     transforms_image = torchvision.transforms.Compose([
@@ -152,7 +143,6 @@ def test(args):
     image = image.crop((int(x_min), int(y_min), int(x_max), int(y_max)))
     image = transforms_image(image)
 
-    # Task IDs: 0=segmentation, 1=landmark, 2=headpose, 3=attribute, 4=age, 5=gender, 6=race, 7=visibility
     if args.task == "parsing":
         task = torch.tensor([0])
     elif args.task == "landmarks":
@@ -161,26 +151,11 @@ def test(args):
         task = torch.tensor([2])
     elif args.task == "attributes":
         task = torch.tensor([3])
-    elif args.task == "age":
+    elif args.task == "age_gender_race":
         task = torch.tensor([4])
-    elif args.task == "gender":
-        task = torch.tensor([5])
-    elif args.task == "race":
-        task = torch.tensor([6])
     elif args.task == "visibility":
-        task = torch.tensor([7])
-    
-    # Use current dataset keys (singular form)
-    data = {'image': image, 'label': {
-        "segmentation": torch.zeros([224,224]),
-        "landmark": torch.zeros([136]),  # Flattened 68*2
-        "headpose": torch.zeros([3]),
-        "attribute": torch.zeros([40]),
-        "age": torch.zeros([1]),
-        "gender": torch.zeros([1]),
-        "race": torch.zeros([1]),
-        'visibility': torch.zeros([29])
-    }, 'task': task}
+        task = torch.tensor([5])
+    data = {'image': image, 'label': {"segmentation":torch.zeros([224,224]), "lnm_seg": torch.zeros([5, 2]),"landmark": torch.zeros([68, 2]), "headpose": torch.zeros([3]), "attribute": torch.zeros([40]), "a_g_e": torch.zeros([3]), 'visibility': torch.zeros([29])}, 'task': task}
     images, labels, tasks = data["image"], data["label"], data["task"]
     images = images.unsqueeze(0).to(device=device)
     for k in labels.keys():
@@ -230,46 +205,25 @@ def test(args):
         with open(f'{save_path}', 'w') as file:
             file.write(joined_pred)
         file.close()
-    # Age prediction (task 4)
     if tasks[0] == 4:
-        age_bucket = torch.argmax(age_output, dim=1)[0].item()
-        age_ranges = ['0-9', '10-19', '20-29', '30-39', '40-49', '50-59', '60-69', '70+']
-        save_path = os.path.join(args.results_path, "age.txt")
+        age_preds = torch.argmax(age_output, dim=1)[0]
+        gender_preds = torch.argmax(gender_output, dim=1)[0]
+        race_preds = torch.argmax(race_output, dim=1)[0]
+        save_path = os.path.join(args.results_path, "age_gender_race.txt")
         with open(f'{save_path}', 'w') as file:
-            file.write(f"Age Range: {age_ranges[age_bucket]}\n")
-            file.write(f"Age Bucket: {age_bucket}")
+            file.write(f"Age: {age_preds.item()} \n")
+            file.write(f"Gender: {gender_preds.item()} \n")
+            file.write(f"Race: {race_preds.item()}")
         file.close()
-    
-    # Gender prediction (task 5)
     if tasks[0] == 5:
-        gender_pred = torch.argmax(gender_output, dim=1)[0].item()
-        gender_labels = ['Male', 'Female']
-        save_path = os.path.join(args.results_path, "gender.txt")
-        with open(f'{save_path}', 'w') as file:
-            file.write(f"Gender: {gender_labels[gender_pred]}\n")
-            file.write(f"Gender ID: {gender_pred}")
-        file.close()
-    
-    # Race prediction (task 6)
-    if tasks[0] == 6:
-        race_pred = torch.argmax(race_output, dim=1)[0].item()
-        race_labels = ['White', 'Black', 'Asian', 'Indian', 'Others']
-        save_path = os.path.join(args.results_path, "race.txt")
-        with open(f'{save_path}', 'w') as file:
-            file.write(f"Race: {race_labels[race_pred]}\n")
-            file.write(f"Race ID: {race_pred}")
-        file.close()
-    # Visibility prediction (task 7)
-    if tasks[0] == 7:
         probs = torch.sigmoid(visibility_output[0])
         preds = (probs >= 0.5).float()
         pred = preds.tolist()
         pred_str = [str(int(b)) for b in pred]
-        joined_pred = " ".join(pred_str)
+        joined_pred =  " ".join(pred_str)
         save_path = os.path.join(args.results_path, "visibility.txt")
         with open(f'{save_path}', 'w') as file:
-            file.write(f"Visibility (29 landmarks): {joined_pred}\n")
-            file.write(f"Total visible: {int(sum(pred))}/29")
+            file.write(joined_pred)
         file.close()
     image = unnormalize(images[0].detach().cpu())
     image = image.permute(1, 2, 0).numpy()
@@ -289,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, help="Provide absolute path to your weights file")
     parser.add_argument("--image_path", type=str, help="Provide absolute path to the image you want to perform inference on")
     parser.add_argument("--results_path", type=str, help="Provide path to the folder where results need to be saved")
-    parser.add_argument("--task", type=str, help="parsing, landmarks, headpose, attributes, age, gender, race, or visibility")
+    parser.add_argument("--task", type=str, help="parsing" or "landmarks" or "headpose" or "attributes" or "age_gender_race" or "visibility")
     parser.add_argument("--gpu_num", type=str, help="Provide the gpu number")
     args = parser.parse_args()  
     test(args)
