@@ -120,6 +120,7 @@ class FaceDecoder(nn.Module):
 
         hs, src = self.transformer(src, pos_src, tokens)
     
+        # extract individual task token outputs
         landmarks_token_out = hs[:, 0, :]
         pose_token_out =  hs[:, 1, :]
         attribute_token_out = hs[:, 2, :]

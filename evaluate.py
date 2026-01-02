@@ -12,6 +12,18 @@ For multi-GPU:
 import torch
 import argparse
 from pathlib import Path
+import json
+import numpy as np
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 # Import from train.py
 from train import (
@@ -143,7 +155,7 @@ def main():
         results_file = output_dir / 'test_results.json'
         
         with open(results_file, 'w') as f:
-            json.dump(test_results, f, indent=2)
+            json.dump(test_results, f, indent=2, cls=NumpyEncoder)
         
         print(f"\n✓ Test results saved to: {results_file}")
         

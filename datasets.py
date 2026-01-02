@@ -705,6 +705,11 @@ class MultiLabelDatasetWrapper:
         image, targets = self.base_dataset[idx]
         return (image, {self.target_task: targets[self.target_task], 
                        'task_id': torch.tensor(self.task_id_map[self.target_task])})
+    
+    def get_name(self):
+        """Return the name of the underlying dataset for display purposes."""
+        base_name = self.base_dataset.__class__.__name__
+        return f"{base_name} ({self.target_task})"
 
 
 class UTKFaceDataset(TaskDataset):

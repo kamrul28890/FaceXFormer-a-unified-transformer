@@ -28,6 +28,16 @@ import json
 from sklearn.metrics import f1_score, accuracy_score, precision_recall_curve
 import numpy as np
 
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 # Suppress DDP gradient stride mismatch warning (performance warning only, not an error)
 warnings.filterwarnings('ignore', message='Grad strides do not match bucket view strides')
 
@@ -397,8 +407,8 @@ def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8)
     Compute recall at a given precision threshold for visibility prediction.
     
     Args:
-        predictions: [B, 68] tensor (visibility scores per landmark)
-        ground_truth: [B, 68] tensor (binary visibility labels)
+        predictions: [B, 29] tensor (visibility scores per landmark)
+        ground_truth: [B, 29] tensor (visibility labels, may be continuous)
         target_precision: desired precision threshold (default 0.8)
     
     Returns:
@@ -406,6 +416,9 @@ def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8)
     """
     predictions = torch.sigmoid(predictions).cpu().numpy().flatten()
     ground_truth = ground_truth.cpu().numpy().flatten()
+    
+    # Ensure ground_truth is binary (some datasets may have continuous values)
+    ground_truth = (ground_truth > 0.5).astype(int)
     
     # Compute precision-recall curve
     precisions, recalls, thresholds = precision_recall_curve(ground_truth, predictions)
@@ -496,7 +509,11 @@ def validate_per_dataset(
         
         # Evaluate each dataset for this task
         for dataset_idx, dataset in enumerate(datasets):
-            dataset_name = dataset.__class__.__name__
+            # Get dataset name - check if it's a wrapper with custom name method
+            if hasattr(dataset, 'get_name'):
+                dataset_name = dataset.get_name()
+            else:
+                dataset_name = dataset.__class__.__name__
             
             # Create dataloader for single dataset
             if world_size > 1:
@@ -527,6 +544,7 @@ def validate_per_dataset(
             dataset_loss = 0.0
             dataset_metric = 0.0
             num_batches = 0
+            first_batch_checked = False  # Flag for debug output
             
             with torch.no_grad():
                 if rank == 0:
@@ -579,14 +597,20 @@ def validate_per_dataset(
                     
                     # Compute task-specific metric
                     if task_name == 'segmentation':
-                        if 'seg_mask' in targets:
-                            metric = compute_f1_score(seg_out, targets['seg_mask'])
+                        if 'segmentation' in targets:
+                            metric = compute_f1_score(seg_out, targets['segmentation'])
                             dataset_metric += metric
+                        elif rank == 0 and not first_batch_checked:
+                            print(f"      ⚠️ WARNING: 'segmentation' not in targets. Available keys: {list(targets.keys())}")
+                            first_batch_checked = True
                     
                     elif task_name == 'landmark':
-                        if 'landmarks' in targets:
-                            metric = compute_nme(landmark_out, targets['landmarks'])
+                        if 'landmark' in targets:
+                            metric = compute_nme(landmark_out, targets['landmark'])
                             dataset_metric += metric
+                        elif rank == 0 and not first_batch_checked:
+                            print(f"      ⚠️ WARNING: 'landmark' not in targets. Available keys: {list(targets.keys())}")
+                            first_batch_checked = True
                     
                     elif task_name == 'headpose':
                         if 'headpose' in targets:
@@ -595,9 +619,12 @@ def validate_per_dataset(
                             dataset_metric += metric
                     
                     elif task_name == 'attribute':
-                        if 'attributes' in targets:
-                            metric = compute_accuracy(attribute_out, targets['attributes'])
+                        if 'attribute' in targets:
+                            metric = compute_accuracy(attribute_out, targets['attribute'])
                             dataset_metric += metric
+                        elif rank == 0 and not first_batch_checked:
+                            print(f"      ⚠️ WARNING: 'attribute' not in targets. Available keys: {list(targets.keys())}")
+                            first_batch_checked = True
                     
                     elif task_name == 'age':
                         if 'age' in targets:
@@ -1009,7 +1036,7 @@ def main():
         if rank == 0:
             results_file = os.path.join(config.CHECKPOINT_DIR, 'test_results.json')
             with open(results_file, 'w') as f:
-                json.dump(test_results, f, indent=2)
+                json.dump(test_results, f, indent=2, cls=NumpyEncoder)
             print(f"\n✓ Test results saved to: {results_file}")
             
             # Print summary table

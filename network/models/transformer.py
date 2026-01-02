@@ -66,13 +66,17 @@ class TwoWayTransformer(nn.Module):
           mlp_dim (int): the channel dimension internal to the MLP block
           activation (nn.Module): the activation to use in the MLP block
         """
+        # "Decoder" block and "unified head" from the paper
+
         super().__init__()
-        self.depth = depth
+        self.depth = depth  # usually 2
         self.embedding_dim = embedding_dim
         self.num_heads = num_heads
         self.mlp_dim = mlp_dim
         self.layers = nn.ModuleList()
 
+        # this loop creates the two (N=2) "decoder" blocks of the paper
+        # TwoWayAttentionBlock is actually the "decoder" block of the paper
         for i in range(depth):
             self.layers.append(
                 TwoWayAttentionBlock(
@@ -85,6 +89,8 @@ class TwoWayTransformer(nn.Module):
                 )
             )
 
+        
+        # essentially the "unified head" of the paper
         self.final_attn_token_to_image = Attention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
         )  # token to face cross attention in unified head
@@ -115,8 +121,8 @@ class TwoWayTransformer(nn.Module):
         image_pe = image_pe.flatten(2).permute(0, 2, 1)
 
         # Prepare queries
-        queries = point_embedding
-        keys = image_embedding
+        queries = point_embedding  # task tokens
+        keys = image_embedding  # face tokens
 
         # Apply transformer blocks and final layernorm
         for layer in self.layers:
@@ -127,14 +133,15 @@ class TwoWayTransformer(nn.Module):
                 key_pe=image_pe,
             )
 
+        # essentially the "unified head" of the paper
         # Apply the final attention layer from the points to the image
         q = queries + point_embedding
         k = keys + image_pe
-        attn_out = self.final_attn_token_to_image(q=q, k=k, v=keys)
-        queries = queries + attn_out
-        queries = self.norm_final_attn(queries)
+        attn_out = self.final_attn_token_to_image(q=q, k=k, v=keys)  # TFCA in unified head
+        queries = queries + attn_out  # residual connection in unified head
+        queries = self.norm_final_attn(queries)  # layernorm in unified head
 
-        return queries, keys
+        return queries, keys  # modified task tokens (queries) and face tokens (keys)
 
 
 class TwoWayAttentionBlock(nn.Module):
@@ -160,6 +167,10 @@ class TwoWayAttentionBlock(nn.Module):
           activation (nn.Module): the activation of the mlp block
           skip_first_layer_pe (bool): skip the PE on the first layer
         """
+        # Conceptually the "decoder" block from the paper
+
+        # TSA -> residual connection -> layernorm -> TFCA -> residual connection -> layernorm -> 2 layer MLP (Linear block) -> residual connection -> layernorm -> FTCA -> residual connection -> layernorm
+
         super().__init__()
         self.self_attn = Attention(embedding_dim, num_heads) # task self-attention
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -172,18 +183,19 @@ class TwoWayAttentionBlock(nn.Module):
         self.mlp = MLPBlock(embedding_dim, mlp_dim, activation)
         self.norm3 = nn.LayerNorm(embedding_dim)
 
-        self.norm4 = nn.LayerNorm(embedding_dim)
         self.cross_attn_image_to_token = Attention(
             embedding_dim, num_heads, downsample_rate=attention_downsample_rate
         ) # face to token cross attention
+
+        self.norm4 = nn.LayerNorm(embedding_dim)
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
     def forward(
         self, queries: Tensor, keys: Tensor, query_pe: Tensor, key_pe: Tensor
     ) -> Tuple[Tensor, Tensor]:
-        # queries: task tokens
-        # keys: face tokens
+        # queries: task tokens [B, 18, 256]
+        # keys: face tokens [B, 3136, 256]
 
         # Task self-attention block
         if self.skip_first_layer_pe:
@@ -191,28 +203,29 @@ class TwoWayAttentionBlock(nn.Module):
         else:
             q = queries + query_pe
             attn_out = self.self_attn(q=q, k=q, v=queries)
-            queries = queries + attn_out
+            queries = queries + attn_out  # residual connection
+
         queries = self.norm1(queries)
 
         # Cross attention block, tokens attending to image embedding
         q = queries + query_pe
         k = keys + key_pe
         # token to face cross attention
-        attn_out = self.cross_attn_token_to_image(q=q, k=k, v=keys)
-        queries = queries + attn_out
+        attn_out = self.cross_attn_token_to_image(q=q, k=k, v=keys)  # TFCA
+        queries = queries + attn_out  # residual connection
         queries = self.norm2(queries)
 
         # MLP block
         mlp_out = self.mlp(queries)
-        queries = queries + mlp_out
+        queries = queries + mlp_out  # residual connection
         queries = self.norm3(queries)
 
         # Cross attention block, image embedding attending to tokens
         q = queries + query_pe
         k = keys + key_pe
         # face to token cross attention
-        attn_out = self.cross_attn_image_to_token(q=k, k=q, v=queries)
-        keys = keys + attn_out
+        attn_out = self.cross_attn_image_to_token(q=k, k=q, v=queries)  # FTCA
+        keys = keys + attn_out  # residual connection
         keys = self.norm4(keys)
 
         return queries, keys  # modified task tokens (queries) and face tokens (keys)
