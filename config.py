@@ -122,15 +122,24 @@ class Config:
     RACE_DIM = 5        # 5 race categories
     SEGMENTATION_CLASSES = 11  # Face segmentation classes
     
-    # Loss weights (lambda values from the paper)
+    # Loss weights (lambda values - adjusted for better performance)
+    # 
+    # Reasoning based on evaluation results:
+    # - Age: Keep at 1.0 (high MAE needs MORE training focus, not less)
+    # - Segmentation: Increase from 1.0→2.5 (underperforming: 0.8647 vs 0.9201 target)
+    # - Visibility: Keep at 1.0 (loss magnitude is OK when normalized)
+    # - Gender/Race: Decrease from 1.0→0.7 (showing perfect scores, possible overfit)
+    # - Landmarks: Keep at 1.0 (performing well, 0.0423 vs 0.0467 target)
+    # - Headpose: Keep at 1.0 (performing very well)
+    # - Attributes: Increase from 1.0→1.2 (slightly underperforming: 0.9127 vs 0.9183)
     LOSS_WEIGHTS = {
-        'seg': 1.0,        # λ_seg (segmentation)
-        'ind': 1.0,        # λ_ind (landmarks)
-        'hpe': 1.0,        # λ_hpe (head pose estimation)
-        'attr': 1.0,       # λ_attr (attributes)
-        'a': 1.0,          # λ_a (age)
-        'g/r': 1.0,        # λ_g/r (gender/race)
-        'vis': 1.0         # λ_vis (visibility)
+        'seg': 2.5,        # λ_seg (segmentation) - increased to improve F1-score
+        'ind': 1.0,        # λ_ind (landmarks) - performing well, keep as is
+        'hpe': 1.0,        # λ_hpe (head pose) - performing well, keep as is
+        'attr': 1.2,       # λ_attr (attributes) - slightly increase for better accuracy
+        'a': 1.0,          # λ_a (age) - keep at 1.0, high MAE needs training focus
+        'g/r': 0.7,        # λ_g/r (gender/race) - reduced to prevent overfitting
+        'vis': 1.0         # λ_vis (visibility) - keep at 1.0
     }
     
     # Training configuration - Auto-configured based on GPU memory

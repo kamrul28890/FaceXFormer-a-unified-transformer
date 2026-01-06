@@ -293,7 +293,7 @@ class MultiTaskLoss(nn.Module):
             age_pred = predictions['age_output']  # [B, 8]
             
             if 'age' in labels:
-                age_mask = (task_ids == 4) | (task_ids == 5)
+                age_mask = (task_ids == 4)
                 
                 if age_mask.any():
                     age_pred_masked = age_pred[age_mask]
@@ -328,7 +328,7 @@ class MultiTaskLoss(nn.Module):
             gender_pred = predictions['gender_output']  # [B, 2]
             
             if 'gender' in labels:
-                gender_mask = (task_ids == 5) | (task_ids == 6)
+                gender_mask = (task_ids == 5)
                 
                 if gender_mask.any():
                     gender_pred_masked = gender_pred[gender_mask]
@@ -351,7 +351,7 @@ class MultiTaskLoss(nn.Module):
             race_pred = predictions['race_output']  # [B, 5]
             
             if 'race' in labels:
-                race_mask = (task_ids == 6) | (task_ids == 7)
+                race_mask = (task_ids == 6)
                 
                 if race_mask.any():
                     race_pred_masked = race_pred[race_mask]
@@ -374,7 +374,7 @@ class MultiTaskLoss(nn.Module):
             vis_pred = predictions['visibility_output']  # [B, 29]
             
             if 'visibility' in labels:
-                vis_mask = (task_ids == 7) | (task_ids == 8)
+                vis_mask = (task_ids == 7)
                 
                 if vis_mask.any():
                     vis_pred_masked = vis_pred[vis_mask]  # [N, 29]
