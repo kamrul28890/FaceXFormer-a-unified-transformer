@@ -34,6 +34,44 @@ except ImportError:
     config = None
 
 
+def age_to_bucket(age):
+    """
+    Convert continuous age to bucket index (0-7).
+    
+    Buckets (from authors):
+        0: 0-9
+        1: 10-19
+        2: 20-29
+        3: 30-39
+        4: 40-49
+        5: 50-59
+        6: 60-69
+        7: 70+
+    
+    Args:
+        age: int or float, age in years
+    
+    Returns:
+        int: bucket index 0-7
+    """
+    if age < 10:
+        return 0
+    elif age < 20:
+        return 1
+    elif age < 30:
+        return 2
+    elif age < 40:
+        return 3
+    elif age < 50:
+        return 4
+    elif age < 60:
+        return 5
+    elif age < 70:
+        return 6
+    else:
+        return 7
+
+
 def simple_augmentation(image, target_size=None):
     """Simple augmentation: resize and normalize."""
     if target_size is None:
@@ -667,6 +705,11 @@ class MultiLabelDatasetWrapper:
         image, targets = self.base_dataset[idx]
         return (image, {self.target_task: targets[self.target_task], 
                        'task_id': torch.tensor(self.task_id_map[self.target_task])})
+    
+    def get_name(self):
+        """Return the name of the underlying dataset for display purposes."""
+        base_name = self.base_dataset.__class__.__name__
+        return f"{base_name} ({self.target_task})"
 
 
 class UTKFaceDataset(TaskDataset):
@@ -699,8 +742,11 @@ class UTKFaceDataset(TaskDataset):
         parts = img_path.stem.split('_')
         age, gender, race = int(parts[0]), int(parts[1]), int(parts[2])
         
+        # Convert age to bucket index (0-7)
+        age_bucket = age_to_bucket(age)
+        
         image = simple_augmentation(image, self.target_size)
-        return (image, {'age': age, 'gender': gender, 'race': race})
+        return (image, {'age': age_bucket, 'gender': gender, 'race': race})
 
 
 class FairFaceDataset(TaskDataset):
@@ -711,8 +757,17 @@ class FairFaceDataset(TaskDataset):
         csv_split = 'train' if split == 'train' else 'val'
         csv_file = self.data_root / 'extracted' / f'{csv_split}_labels.csv'
         
-        age_map = {'0-2': 1, '3-9': 6, '10-19': 14, '20-29': 24, '30-39': 34, 
-                  '40-49': 44, '50-59': 54, '60-69': 64, 'more than 70': 8}
+        age_map = {
+            '0-2': 0,      # 0-9 bucket
+            '3-9': 0,      # 0-9 bucket
+            '10-19': 1,    # 10-19 bucket
+            '20-29': 2,    # 20-29 bucket
+            '30-39': 3,    # 30-39 bucket
+            '40-49': 4,    # 40-49 bucket
+            '50-59': 5,    # 50-59 bucket
+            '60-69': 6,    # 60-69 bucket
+            'more than 70': 7  # 70+ bucket
+        }
         race_map = {'White': 0, 'Black': 1, 'Asian': 2, 'Indian': 3, 'Others': 4}
         gender_map = {'Male': 0, 'Female': 1}
         
@@ -727,7 +782,7 @@ class FairFaceDataset(TaskDataset):
                 if img_path.exists():
                     self.data.append(img_path)
                     self.labels.append({
-                        'age': age_map.get(row['age'], 30),
+                        'age': age_map.get(row['age'], 3),  # Default to bucket 3 (30-39) if unknown
                         'gender': gender_map.get(row['gender'], 0),
                         'race': race_map.get(row['race'], 4)
                     })

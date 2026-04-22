@@ -156,7 +156,7 @@ class Config:
     # GRADIENT_CHECKPOINTING = _auto_config['gradient_checkpointing']
     # _manual_override = False
     
-    NUM_EPOCHS = 12
+    NUM_EPOCHS = 15
     WEIGHT_DECAY = 1e-5
     LR_DECAY_EPOCHS = [6, 10]  # Decay by factor of 10 at epochs 6 and 10
     LR_DECAY_FACTOR = 0.1
