@@ -298,6 +298,85 @@ Each batch contains samples from multiple tasks:
 - Only relevant predictions are used for each sample
 - Efficient GPU utilization across all tasks
 
+## Data Augmentation
+
+Task-specific augmentation pipelines are implemented in [datasets.py](datasets.py). All augmentations are applied **only during training**; evaluation uses clean resized images. ImageNet normalization (mean `[0.485, 0.456, 0.406]`, std `[0.229, 0.224, 0.225]`) is applied to all tasks.
+
+### Landmark Detection (300W)
+
+ArcFace face alignment is applied first: 5 keypoints are derived from the 68-point annotations and used to estimate a partial affine transform that aligns the face to a canonical template (scaled from the 112×112 ArcFace template to the target resolution). Geometric augmentations are then applied jointly to the image and landmarks so they remain consistent.
+
+| Augmentation | Parameters | Probability |
+|---|---|---|
+| ArcFace alignment | 5-point template (always applied) | 100% |
+| Rotation | ±18° around image centre | 100% (sampled) |
+| Scaling | 0.9–1.1× around centre | 100% (sampled) |
+| Translation | ±5% of image size | 100% (sampled) |
+| Horizontal flip | Landmark indices reordered via `_FLIP_INDICES_68` | 50% |
+| Grayscale | Convert to gray and back to RGB | 20% |
+| Gaussian blur | Radius 0.5–2.0 px | 30% |
+| Random occlusion | Random-colour rectangle, 10–40% of image size | 40% |
+| Gamma correction | γ ∈ [0.7, 1.3] | 20% |
+
+### Head Pose Estimation (300W-LP)
+
+| Augmentation | Parameters | Probability |
+|---|---|---|
+| Random resized crop | 80–100% of image, re-scaled to target size | 100% (sampled) |
+| Grayscale | Convert to gray and back to RGB | 10% |
+| Gaussian blur | Radius 0.5–1.5 px | 10% |
+| Gamma correction | γ ∈ [0.7, 1.3] | 10% |
+
+### Attribute Prediction (CelebA)
+
+| Augmentation | Parameters | Probability |
+|---|---|---|
+| Rotation | ±18° | 100% (sampled) |
+| Scaling | 0.9–1.1× around centre | 100% (sampled) |
+| Translation | ±1% of image size | 100% (sampled) |
+| Horizontal flip | Mirror image | 50% |
+| Grayscale | Convert to gray and back to RGB | 10% |
+| Gaussian blur | Radius 0.5–1.5 px | 10% |
+| Gamma correction | γ ∈ [0.7, 1.3] | 20% |
+
+### Age / Gender / Race (UTKFace, FairFace)
+
+| Augmentation | Parameters | Probability |
+|---|---|---|
+| Rotation | ±18° | 100% (sampled) |
+| Scaling | 0.9–1.1× around centre | 100% (sampled) |
+| Translation | ±1% of image size | 100% (sampled) |
+| Horizontal flip | Mirror image | 50% |
+| Grayscale | Convert to gray and back to RGB | 10% |
+| Gaussian blur | Radius 0.5–1.5 px | 10% |
+| Gamma correction | γ ∈ [0.7, 1.3] | 10% |
+
+### Visibility Prediction (COFW)
+
+Horizontal flip reorders the 29 visibility labels according to the symmetric `_COFW_FLIP_IDX` mapping so that left/right landmark labels remain correct after mirroring.
+
+| Augmentation | Parameters | Probability |
+|---|---|---|
+| Horizontal flip | Visibility labels reordered via `_COFW_FLIP_IDX` | 50% |
+| Grayscale | Convert to gray and back to RGB | 10% |
+| Gaussian blur | Radius 0.5–1.5 px | 10% |
+| Gamma correction | γ ∈ [0.7, 1.3] | 10% |
+
+### Face Parsing (CelebAMask-HQ)
+
+No random augmentations are applied. Images are resized to the target resolution and normalized with ImageNet statistics.
+
+### Summary
+
+| Task | Rotation | Scale | Translate | Flip | Grayscale | Blur | Occlusion | Gamma | ArcFace Align |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Landmark Detection | ✅ ±18° | ✅ ±10% | ✅ ±5% | ✅ 50% | ✅ 20% | ✅ 30% | ✅ 40% | ✅ 20% | ✅ |
+| Head Pose | ❌ | ❌ | ✅ crop | ❌ | ✅ 10% | ✅ 10% | ❌ | ✅ 10% | ❌ |
+| Attributes | ✅ ±18° | ✅ ±10% | ✅ ±1% | ✅ 50% | ✅ 10% | ✅ 10% | ❌ | ✅ 20% | ❌ |
+| Age/Gender/Race | ✅ ±18° | ✅ ±10% | ✅ ±1% | ✅ 50% | ✅ 10% | ✅ 10% | ❌ | ✅ 10% | ❌ |
+| Visibility | ❌ | ❌ | ❌ | ✅ 50% | ✅ 10% | ✅ 10% | ❌ | ✅ 10% | ❌ |
+| Face Parsing | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
 ## Configuration
 
 Edit [config.py](config.py) to adjust training settings:
