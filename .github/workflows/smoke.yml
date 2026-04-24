@@ -1,0 +1,26 @@
+name: Smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Compile project scripts
+        run: |
+          python -m py_compile `
+            config.py `
+            datasets.py `
+            losses.py `
+            train.py `
+            train_simple.py `
+            evaluate.py `
+            scripts/small_run_common.py `
+            scripts/baseline_verification.py `
+            scripts/ablation_study_tiny.py

@@ -4,7 +4,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 env/
+.venv/
 venv/
 ENV/
 build/
@@ -26,15 +31,28 @@ wheels/
 # PyTorch
 *.pth
 *.pt
+*.ckpt
+*.safetensors
+*.onnx
 checkpoints/
 logs/
 runs/
+results/
 wandb/
 
 # Datasets (too large for git)
 datasets/
 *.pkl
 *.cache
+
+# Large local reference/download artifacts
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
 
 # IDE
 .vscode/
