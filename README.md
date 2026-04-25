@@ -60,14 +60,20 @@ Pick the command that matches your driver (from Step 1):
 
 ```bash
 # CUDA 12.1 (driver ≥ 525) — recommended for modern servers
-conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia -y
+# Pins pytorch==2.4.0 and mkl<2025 to avoid MKL 2025 iJIT_NotifyEvent symbol error
+conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 "mkl<2025" \
+    -c pytorch -c nvidia -c defaults -y
 
 # CUDA 11.8 (driver ≥ 520)
-conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia -y
+conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=11.8 "mkl<2025" \
+    -c pytorch -c nvidia -c defaults -y
 
 # CUDA 11.7 (driver ≥ 450) — matches the bundled environment_facex.yml
-conda install pytorch=2.0.1 torchvision pytorch-cuda=11.7 -c pytorch -c nvidia -y
+conda install pytorch==2.0.1 torchvision==0.15.2 pytorch-cuda=11.7 "mkl<2025" \
+    -c pytorch -c nvidia -c defaults -y
 ```
+
+> **Why pin versions?** Unpinned `conda install pytorch` currently resolves to PyTorch 2.5.1 whose conda package cache entry has a known corruption issue (missing `__pycache__` files). Pinning `pytorch==2.4.0` sidesteps this. The `"mkl<2025"` pin prevents MKL 2025+ from being installed, which removed `libittnotify.so` and causes `iJIT_NotifyEvent: undefined symbol` errors at import time.
 
 > If your cluster uses modules (e.g. `module load cuda/12.1`), load the CUDA module **before** running this step.
 
