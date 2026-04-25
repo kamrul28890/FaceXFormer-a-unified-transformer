@@ -424,21 +424,26 @@ The training script automatically adjusts batch size based on available GPU memo
 
 ```
 facexformer-main/
-├── README.md              # This file
-├── config.py              # Configuration settings
-├── datasets.py            # Dataset implementations with upsampling
-├── losses.py              # Multi-task loss functions
-├── train.py               # Multi-GPU training script (DDP)
-├── train_simple.py        # Single-GPU training script
-├── launch_train.sh        # Launch script (Linux)
-├── launch_train.bat       # Launch script (Windows)
-├── test_setup.py          # Verification script
+├── README.md                    # This file
+├── config.py                    # Configuration settings
+├── datasets.py                  # Dataset implementations with upsampling
+├── losses.py                    # Multi-task loss functions
+├── train.py                     # Multi-GPU training script (DDP)
+├── train_simple.py              # Single-GPU training script
+├── ablation_study.py            # Full-dataset ablation study (multi-GPU, DDP)
+├── submit_job.slurm             # SLURM job script for main training
+├── submit_ablation.slurm        # SLURM job script for full ablation study
+├── test_setup.py                # Verification script
+├── scripts/
+│   ├── small_run_common.py      # Shared utilities for tiny smoke-test runs
+│   ├── baseline_verification.py # Tiny baseline evaluation against paper numbers
+│   └── ablation_study_tiny.py  # Tiny ablation smoke-test (multi-GPU, DDP)
 ├── network/
 │   └── models/
-│       ├── facexformer.py    # Main model
-│       └── transformer.py    # TwoWayTransformer decoder
-├── checkpoints/           # Saved model checkpoints
-└── logs/                  # Training logs
+│       ├── facexformer.py       # Main model
+│       └── transformer.py      # TwoWayTransformer decoder
+├── checkpoints/                 # Saved model checkpoints
+└── logs/                        # Training logs
 ```
 
 ## Monitoring Training
@@ -571,6 +576,112 @@ This will test:
 6. ✅ Loss computation
 
 All tests should pass before starting training.
+
+## scripts/ Folder
+
+The `scripts/` directory contains three utilities for **pipeline verification and smoke testing** before committing to a full training run. They are not part of the main training pipeline.
+
+### `scripts/small_run_common.py` — Shared utilities
+
+Provides helpers used by both other scripts:
+
+| Symbol | Purpose |
+|---|---|
+| `TASK_IDS` | Maps each of the 8 task names to their integer ID |
+| `PAPER_TARGETS` | Published benchmark targets (e.g. segmentation F1 → 92.01) for gap analysis |
+| `NamedSubset` | Wraps a `Dataset` and randomly draws a fixed-size fragment |
+| `build_train_datasets` | Constructs tiny train dataset fragments for all 8 tasks |
+| `build_eval_datasets` | Constructs tiny eval dataset fragments for all 8 tasks |
+| `load_checkpoint_if_available` | Loads a `.pth` checkpoint with DDP prefix stripping; supports partial/shape-compatible loading |
+| `predictions_from_outputs` | Unpacks the 8-tuple returned by `FaceXFormer.forward()` into a named dict |
+| `resolve_dataset_root` | Resolves the dataset root, handling the `../facexformer-my/datasets` default |
+
+### `scripts/baseline_verification.py` — Pre-training sanity check
+
+Evaluates tiny dataset fragments and prints per-task metrics alongside paper targets. Two modes:
+
+- **Smoke test** (no checkpoint): loads random weights, verifies the data → model → loss → metric chain does not crash.
+- **Baseline comparison** (with `--checkpoint`): loads trained weights and reports the gap between measured metric and the paper number.
+
+Supports distributed training (DDP) through the `evaluate_tiny()` function, which is also imported by `scripts/ablation_study_tiny.py`.
+
+```bash
+# Smoke test (no checkpoint required)
+python scripts/baseline_verification.py --max-samples 4 --batch-size 2
+
+# Baseline comparison with a checkpoint
+python scripts/baseline_verification.py --checkpoint checkpoints/best_model.pth --max-samples 32
+```
+
+Output is saved to `results/baseline_tiny/gap_analysis_baseline_tiny.{csv,json}`.
+
+### `scripts/ablation_study_tiny.py` — Tiny ablation smoke-test
+
+Trains and evaluates the same 4 ablation variants as the full study, but on tiny dataset fragments for a handful of batches. Used to verify the ablation machinery end-to-end before running `ablation_study.py` on the full dataset. Supports multi-GPU DDP via `torchrun` (same setup as `train.py`).
+
+```bash
+# Smoke test all variants (single GPU, 2 batches, 1 epoch)
+python scripts/ablation_study_tiny.py \
+    --variants full standard_cross_attention unbalanced_sampler uniform_loss \
+    --max-samples 8 --max-train-batches 2 --epochs 1
+
+# Larger tiny run on the cluster (submit via submit_ablation.slurm with small settings)
+python scripts/ablation_study_tiny.py \
+    --variants standard_cross_attention \
+    --max-samples 64 --max-train-batches 50 --epochs 5 --amp
+```
+
+Output is saved to `results/ablation_tiny/<variant>/`.
+
+---
+
+## Ablation Study
+
+The ablation study isolates the contribution of three design choices in FaceXFormer-main:
+
+### Variants
+
+| Variant | What changes | Purpose |
+|---|---|---|
+| `full` | Nothing — unmodified model | Baseline for comparison |
+| `standard_cross_attention` | `cross_attn_image_to_token` replaced with `ZeroAttention` (zero output) in every transformer layer | Tests the value of bidirectional cross-attention vs. standard one-directional cross-attention |
+| `unbalanced_sampler` | `use_balanced_batches=False` in the dataloader | Tests the value of the balanced-batch sampler |
+| `uniform_loss` | All task loss weights set to 1.0 instead of `config.LOSS_WEIGHTS` | Tests the value of the paper's tuned per-task loss weighting |
+
+All variants use the same datasets, augmentation pipeline, optimizer, and learning rate schedule as the main training run.
+
+### Full ablation study (`ablation_study.py`)
+
+Runs a single variant on the **complete dataset** with the same distributed training setup as `train.py`. Submit one SLURM job per variant.
+
+```bash
+# Submit all four variants as separate jobs
+ABLATION_VARIANT=full                     sbatch submit_ablation.slurm
+ABLATION_VARIANT=standard_cross_attention sbatch submit_ablation.slurm
+ABLATION_VARIANT=unbalanced_sampler       sbatch submit_ablation.slurm
+ABLATION_VARIANT=uniform_loss             sbatch submit_ablation.slurm
+```
+
+The `--variant` argument can also be passed directly when running without SLURM:
+
+```bash
+torchrun --standalone --nproc_per_node=4 ablation_study.py --variant standard_cross_attention
+```
+
+Checkpoints are saved to `results/ablation_full/<variant>/checkpoints/` and final test results to `results/ablation_full/<variant>/test_results.json`.
+
+### SLURM configuration (`submit_ablation.slurm`)
+
+Mirrors `submit_job.slurm` exactly (4 nodes, 1 GPU per node, `mpirun` + `torchrun`, NCCL backend). Uses `MASTER_PORT=29502` to avoid conflicts with the main training job (29500) and the tiny ablation script (29501).
+
+### Recommended workflow
+
+1. **Verify pipeline first** — run a smoke test with the tiny script:
+   ```bash
+   python scripts/ablation_study_tiny.py --variants full --max-samples 8 --max-train-batches 2 --epochs 1
+   ```
+2. **Run full ablation** — once smoke test passes, submit the SLURM jobs.
+3. **Compare results** — compare `test_results.json` across the four variant output directories.
 
 ## Citation
 
