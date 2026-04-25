@@ -19,7 +19,7 @@ This implementation adapts the original facexformer-main architecture with compr
 
 ## Installation
 
-> **Note**: A plain `pip install -r requirements.txt` is **not** sufficient. PyTorch and `mmcv` require CUDA-specific wheels that must be installed before the rest of the dependencies.
+> **Note**: A plain `pip install -r requirements.txt` is **not** sufficient. PyTorch requires a CUDA-specific wheel that must be installed via conda before the rest of the dependencies (see Step 3).
 
 ### Recommended: Fresh conda environment (new server)
 
@@ -77,33 +77,15 @@ conda install pytorch==2.0.1 torchvision==0.15.2 pytorch-cuda=11.7 "mkl<2025" \
 
 > If your cluster uses modules (e.g. `module load cuda/12.1`), load the CUDA module **before** running this step.
 
-#### Step 4 — Install `mmcv` (required before `mmsegmentation`)
-
-`mmsegmentation==0.18.0` depends on `mmcv-full`, which has its own CUDA-specific build. Replace `cu121` and `torch2.0` to match your environment:
-
-```bash
-# CUDA 12.1 + PyTorch 2.0
-pip install mmcv-full==1.4.0 \
-    -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.0/index.html
-
-# CUDA 11.8 + PyTorch 2.0
-pip install mmcv-full==1.4.0 \
-    -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
-
-# CUDA 11.7 + PyTorch 2.0
-pip install mmcv-full==1.4.0 \
-    -f https://download.openmmlab.com/mmcv/dist/cu117/torch2.0/index.html
-```
-
-#### Step 5 — Install remaining dependencies
+#### Step 4 — Install remaining dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`torch` and `torchvision` are already installed from Step 3; pip will see them as satisfied and skip them.
+> **Important**: `torch` and `torchvision` are **commented out** in `requirements.txt`. This is intentional — pip and conda share the same `site-packages` directory, so an uncommented `torch>=2.0.0` line would cause pip to uninstall conda's CUDA-enabled torch and replace it with a CPU-only pip wheel. Do not uncomment those lines.
 
-#### Step 6 — Verify the installation
+#### Step 5 — Verify the installation
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
@@ -121,8 +103,6 @@ Use this if you want an exact replica of the original environment (CUDA 11.7, Py
 ```bash
 conda env create -f environment_facex.yml
 conda activate facexformer-main
-pip install mmcv-full==1.4.0 \
-    -f https://download.openmmlab.com/mmcv/dist/cu117/torch2.0/index.html
 pip install -r requirements.txt
 ```
 
@@ -130,9 +110,10 @@ pip install -r requirements.txt
 
 ### Notes on specific packages
 
-- **`mkl-fft`, `mkl-random`, `mkl-service`** — Intel MKL wrappers. These install cleanly on x86 servers but will fail on ARM/POWER nodes (e.g. GH200). If you are on a non-x86 node, remove those three lines from `requirements.txt` before Step 5 — PyTorch bundles its own math libraries.
-- **`triton`** — Linux-only; skip on Windows development machines.
-- **`mxnet`** — historical dependency; not imported by any code in this repo. Skip if it causes install issues.
+- **`mkl-fft`, `mkl-random`, `mkl-service`** — Intel MKL wrappers. These install cleanly on x86 servers but will fail on ARM/POWER nodes (e.g. GH200). If you are on a non-x86 node, remove those three lines from `requirements.txt` before Step 4 — PyTorch bundles its own math libraries.
+- **`typing-extensions`** — pinned to `>=4.8.0` in `requirements.txt`. PyTorch 2.4.0 imports `typing_extensions.deprecated` which was added in 4.4.0; the original repo pinned `==4.3.0` which causes `ImportError: cannot import name 'deprecated'` at torch import time.
+- **`triton`** — commented out in `requirements.txt`; conda's pytorch package already installs the correct triton version. Installing the pip version would downgrade it and break torch.
+- **`mxnet`** — historical dependency; not imported by any code in this repo. Commented out in `requirements.txt`.
 - **`facenet-pytorch`** — only required for `inference.py` (MTCNN face detection). Not needed for training.
 
 ---
@@ -638,6 +619,30 @@ Training output includes:
 - Training time per epoch
 
 ## Troubleshooting
+
+### pip replaced conda torch (ImportError or wrong version)
+
+Symptom: after `pip install -r requirements.txt`, `torch.__version__` shows `2.1.2` instead of `2.4.0`, or you get `ImportError: cannot import name 'deprecated' from 'typing_extensions'`.
+
+Cause: pip and conda share the same `site-packages`. Any uncommented `torch` line in `requirements.txt` (or a transitive dependency that pulls torch) will uninstall the conda torch and replace it with a pip wheel. Once pip removes the files, conda's package metadata becomes stale — it still thinks torch is installed, so `conda install pytorch==2.4.0` will say "already installed" without fixing anything.
+
+Fix:
+```bash
+# 1. Remove the pip-installed torch
+pip uninstall -y torch torchvision triton
+
+# 2. Force-reinstall via conda (--force-reinstall bypasses the stale metadata)
+conda install --force-reinstall pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 "mkl<2025" \
+    -c pytorch -c nvidia -c defaults -y
+
+# 3. Verify
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+# Expected: 2.4.0 True 12.1
+```
+
+> Always confirm `torch` and `torchvision` remain commented out in `requirements.txt` before re-running `pip install -r requirements.txt`.
+
+---
 
 ### Dataset Not Found
 
