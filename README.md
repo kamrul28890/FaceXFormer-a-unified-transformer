@@ -17,6 +17,59 @@ This implementation adapts the original facexformer-main architecture with compr
 - ✅ Task-specific loss weighting
 - ✅ Checkpoint saving and resuming
 
+## Installation
+
+> **Note**: A plain `pip install -r requirements.txt` is **not** sufficient. PyTorch and `mmcv` require CUDA-specific wheels that must be installed before the rest of the dependencies.
+
+### Step 1 — Install CUDA-enabled PyTorch
+
+Choose the command that matches your server's CUDA version. Check with `nvcc --version` or `nvidia-smi`.
+
+| CUDA version | Command |
+|---|---|
+| CUDA 12.1 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` |
+| CUDA 11.8 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118` |
+| CUDA 12.4 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124` |
+
+> Do **not** skip this step. Installing `torch` from PyPI without the index URL gives a CPU-only build.
+
+### Step 2 — Install `mmcv` (required before `mmsegmentation`)
+
+`mmsegmentation==0.18.0` depends on `mmcv`. Install the CUDA-specific build first:
+
+```bash
+# Replace cu121 and torch2.0 to match your environment
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.0/index.html
+```
+
+### Step 3 — Install remaining dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> `torch` and `torchvision` are already installed from Step 1; pip will see them as satisfied and skip them.
+
+### Notes on specific packages
+
+- **`mkl-fft`, `mkl-random`, `mkl-service`** — Intel Math Kernel Library wrappers. These install cleanly on x86 servers but will fail on ARM/POWER nodes (e.g. GH200). If you are on a non-x86 node, remove those three lines from `requirements.txt` before Step 3 — PyTorch bundles its own math libraries.
+- **`triton`** — Linux-only; will fail on Windows. Safe to ignore on Windows development machines.
+- **`mxnet`** — listed as a historical dependency; not imported by any code in this repo. Skip if it causes install issues.
+
+### Conda alternative
+
+If your cluster provides a conda/mamba environment, use the bundled environment file instead:
+
+```bash
+conda env create -f environment_facex.yml
+conda activate facex
+```
+
+Then follow Step 2 above to install `mmcv` into that environment.
+
+---
+
 ## Setup Completion Summary
 
 ### ✅ Completed Tasks
