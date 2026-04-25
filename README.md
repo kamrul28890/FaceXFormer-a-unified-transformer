@@ -21,52 +21,113 @@ This implementation adapts the original facexformer-main architecture with compr
 
 > **Note**: A plain `pip install -r requirements.txt` is **not** sufficient. PyTorch and `mmcv` require CUDA-specific wheels that must be installed before the rest of the dependencies.
 
-### Step 1 — Install CUDA-enabled PyTorch
+### Recommended: Fresh conda environment (new server)
 
-Choose the command that matches your server's CUDA version. Check with `nvcc --version` or `nvidia-smi`.
+This is the safest approach on a new server. It gives you a clean, isolated environment with the correct CUDA-enabled PyTorch.
 
-| CUDA version | Command |
-|---|---|
-| CUDA 12.1 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` |
-| CUDA 11.8 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118` |
-| CUDA 12.4 | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124` |
+> The bundled `environment_facex.yml` pins **CUDA 11.7 + PyTorch 2.0.1**. This works on **any server with CUDA driver ≥ 450**, including servers showing CUDA 12.x in `nvidia-smi` — CUDA drivers are backward-compatible. PyTorch also bundles its own CUDA 11.7 runtime internally, so no system-level CUDA 11.7 toolkit is required.
+>
+> The manual steps below are only needed if you want a newer PyTorch version (e.g. to use features introduced after 2.0.1).
 
-> Do **not** skip this step. Installing `torch` from PyPI without the index URL gives a CPU-only build.
-
-### Step 2 — Install `mmcv` (required before `mmsegmentation`)
-
-`mmsegmentation==0.18.0` depends on `mmcv`. Install the CUDA-specific build first:
+#### Step 1 — Check your server's CUDA driver version
 
 ```bash
-# Replace cu121 and torch2.0 to match your environment
-pip install mmcv-full==1.4.0 \
-    -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.0/index.html
+nvidia-smi          # top-right corner shows "CUDA Version: X.Y"
+nvcc --version      # shows the toolkit version (may differ from driver)
 ```
 
-### Step 3 — Install remaining dependencies
+The driver version determines the maximum CUDA toolkit you can use. Common pairings:
+
+| Driver version | Max CUDA toolkit |
+|---|---|
+| ≥ 570 | CUDA 12.8 |
+| ≥ 525 | CUDA 12.1 |
+| ≥ 520 | CUDA 11.8 |
+| ≥ 450 | CUDA 11.7 |
+
+> **Note**: A newer driver is always compatible with older CUDA runtimes. A server showing `CUDA 12.8` in `nvidia-smi` can run CUDA 11.7, 11.8, 12.1, or 12.8 PyTorch builds.
+
+#### Step 2 — Create the conda environment
+
+```bash
+conda create -n facexformer-main python=3.10 -y
+conda activate facexformer-main
+```
+
+#### Step 3 — Install CUDA-enabled PyTorch
+
+Pick the command that matches your driver (from Step 1):
+
+```bash
+# CUDA 12.1 (driver ≥ 525) — recommended for modern servers
+conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia -y
+
+# CUDA 11.8 (driver ≥ 520)
+conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia -y
+
+# CUDA 11.7 (driver ≥ 450) — matches the bundled environment_facex.yml
+conda install pytorch=2.0.1 torchvision pytorch-cuda=11.7 -c pytorch -c nvidia -y
+```
+
+> If your cluster uses modules (e.g. `module load cuda/12.1`), load the CUDA module **before** running this step.
+
+#### Step 4 — Install `mmcv` (required before `mmsegmentation`)
+
+`mmsegmentation==0.18.0` depends on `mmcv-full`, which has its own CUDA-specific build. Replace `cu121` and `torch2.0` to match your environment:
+
+```bash
+# CUDA 12.1 + PyTorch 2.0
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.0/index.html
+
+# CUDA 11.8 + PyTorch 2.0
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
+
+# CUDA 11.7 + PyTorch 2.0
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu117/torch2.0/index.html
+```
+
+#### Step 5 — Install remaining dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> `torch` and `torchvision` are already installed from Step 1; pip will see them as satisfied and skip them.
+`torch` and `torchvision` are already installed from Step 3; pip will see them as satisfied and skip them.
 
-### Notes on specific packages
+#### Step 6 — Verify the installation
 
-- **`mkl-fft`, `mkl-random`, `mkl-service`** — Intel Math Kernel Library wrappers. These install cleanly on x86 servers but will fail on ARM/POWER nodes (e.g. GH200). If you are on a non-x86 node, remove those three lines from `requirements.txt` before Step 3 — PyTorch bundles its own math libraries.
-- **`triton`** — Linux-only; will fail on Windows. Safe to ignore on Windows development machines.
-- **`mxnet`** — listed as a historical dependency; not imported by any code in this repo. Skip if it causes install issues.
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+python test_setup.py
+```
 
-### Conda alternative
+Both `torch.cuda.is_available()` should return `True` and all `test_setup.py` checks should pass before starting training.
 
-If your cluster provides a conda/mamba environment, use the bundled environment file instead:
+---
+
+### Alternative: Reproduce exact environment from `environment_facex.yml`
+
+Use this if you want an exact replica of the original environment (CUDA 11.7, PyTorch 2.0.1, Python 3.10). Works on any server with **CUDA driver ≥ 450** — including modern servers showing CUDA 12.x in `nvidia-smi`:
 
 ```bash
 conda env create -f environment_facex.yml
-conda activate facex
+conda activate facexformer-main
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu117/torch2.0/index.html
+pip install -r requirements.txt
 ```
 
-Then follow Step 2 above to install `mmcv` into that environment.
+---
+
+### Notes on specific packages
+
+- **`mkl-fft`, `mkl-random`, `mkl-service`** — Intel MKL wrappers. These install cleanly on x86 servers but will fail on ARM/POWER nodes (e.g. GH200). If you are on a non-x86 node, remove those three lines from `requirements.txt` before Step 5 — PyTorch bundles its own math libraries.
+- **`triton`** — Linux-only; skip on Windows development machines.
+- **`mxnet`** — historical dependency; not imported by any code in this repo. Skip if it causes install issues.
+- **`facenet-pytorch`** — only required for `inference.py` (MTCNN face detection). Not needed for training.
 
 ---
 
@@ -280,39 +341,82 @@ For training on a single GPU:
 python train_simple.py
 ```
 
-This script provides:
-- Simple, straightforward training loop
-- No distributed training complexity
-- Progress tracking with tqdm
-- Automatic checkpointing
+### Multi-GPU Training (no job scheduler)
 
-### Multi-GPU Training
+If your server has multiple GPUs but no SLURM or PBS queue, use `torchrun --standalone`. It launches all GPU processes itself with no external scheduler needed.
 
-#### Windows
+#### Basic usage
 
 ```bash
-# Use all available GPUs
-launch_train.bat
+# All 8 GPUs on the machine
+torchrun --standalone --nproc_per_node=8 train.py
 
-# Specify number of GPUs (e.g., 4 GPUs)
-launch_train.bat 4
-
-# Or use torchrun directly
-python -m torch.distributed.run --standalone --nproc_per_node=4 train.py
-```
-
-#### Linux
-
-```bash
-# Use all available GPUs
-bash launch_train.sh
-
-# Specify number of GPUs
-NUM_GPUS=4 bash launch_train.sh
-
-# Or use torchrun directly
+# Specific number of GPUs (e.g. 4)
 torchrun --standalone --nproc_per_node=4 train.py
+
+# Select specific GPU devices (e.g. GPUs 0,1,2,3 out of 8)
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 train.py
 ```
+
+`--standalone` tells torchrun to act as its own rendezvous server — no `MASTER_ADDR` or `MASTER_PORT` setup required.
+
+#### Keep the job running after SSH disconnect
+
+Without a job scheduler you must protect the process from terminal disconnection. Use either:
+
+**tmux (recommended):**
+```bash
+tmux new -s train          # create a named session
+torchrun --standalone --nproc_per_node=8 train.py
+# Ctrl+B, then D to detach — job keeps running
+tmux attach -t train       # reattach later to check progress
+```
+
+**screen:**
+```bash
+screen -S train
+torchrun --standalone --nproc_per_node=8 train.py
+# Ctrl+A, then D to detach
+screen -r train            # reattach
+```
+
+**nohup (no terminal multiplexer needed):**
+```bash
+nohup torchrun --standalone --nproc_per_node=8 train.py \
+    > logs/train.log 2>&1 &
+echo $!                    # prints the PID — save it to kill later if needed
+tail -f logs/train.log     # follow the log in real time
+```
+
+#### Ablation study (no job scheduler)
+
+```bash
+# Single variant, 8 GPUs, foreground (inside tmux/screen)
+torchrun --standalone --nproc_per_node=8 ablation_study.py --variant full
+
+# All four variants back-to-back (each waits for the previous to finish)
+for variant in full standard_cross_attention unbalanced_sampler uniform_loss; do
+    echo "=== Running variant: $variant ==="
+    torchrun --standalone --nproc_per_node=8 ablation_study.py --variant $variant
+done
+
+# Run all four in parallel on different GPU sets (2 GPUs each on an 8-GPU server)
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+    ablation_study.py --variant full &
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 \
+    ablation_study.py --variant standard_cross_attention &
+CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node=2 \
+    ablation_study.py --variant unbalanced_sampler &
+CUDA_VISIBLE_DEVICES=6,7 torchrun --standalone --nproc_per_node=2 \
+    ablation_study.py --variant uniform_loss &
+wait
+```
+
+> When running multiple jobs in parallel on different GPU sets, each needs a distinct `MASTER_PORT` to avoid port conflicts:
+> ```bash
+> CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --master_port=29500 --nproc_per_node=2 ablation_study.py --variant full &
+> CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --master_port=29501 --nproc_per_node=2 ablation_study.py --variant standard_cross_attention &
+> ```
 
 ### Resume Training
 
@@ -321,7 +425,7 @@ torchrun --standalone --nproc_per_node=4 train.py
 python train_simple.py --resume ./checkpoints/checkpoint_epoch_10.pth
 
 # Multi-GPU
-python -m torch.distributed.run --standalone --nproc_per_node=4 train.py --resume ./checkpoints/checkpoint_epoch_10.pth
+torchrun --standalone --nproc_per_node=8 train.py --resume ./checkpoints/checkpoint_epoch_10.pth
 ```
 
 ## Multi-Task Co-Training Strategy

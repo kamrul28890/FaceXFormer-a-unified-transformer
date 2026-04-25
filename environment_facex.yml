@@ -1,4 +1,4 @@
-name: facexformer
+name: facexformer-main
 channels:
   - pytorch
   - nvidia
