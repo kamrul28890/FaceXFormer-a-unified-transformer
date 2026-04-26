@@ -858,7 +858,7 @@ class TaskDataset(Dataset):
 
 class CelebAMaskHQDataset(TaskDataset):
     """CelebAMask-HQ for face parsing. Maps to task 0 (segmentation)."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('CelebAMaskHQ', 'segmentation', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebAMask-HQ'
         img_dir = self.data_root / 'CelebA-HQ-img'
@@ -899,7 +899,7 @@ class CelebAMaskHQDataset(TaskDataset):
 
 class W300Dataset(TaskDataset):
     """300W for landmarks. Maps to task 1."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('300W', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300w'
         base_path = self.data_root / '300W' if (self.data_root / '300W').exists() else self.data_root
@@ -937,7 +937,7 @@ class W300Dataset(TaskDataset):
 
 class W300LPDataset(TaskDataset):
     """300W-LP for head pose. Maps to task 2."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('300W-LP', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / '300W_LP'
         self.data = []
@@ -962,7 +962,7 @@ class W300LPDataset(TaskDataset):
 
 class CelebADataset(TaskDataset):
     """CelebA for attributes. Maps to task 3."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets', rank=0, world_size=1):
+    def __init__(self, split='train', dataset_root='datasets', rank=0, world_size=1):
         super().__init__('CelebA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebA'
         self.rank = rank
@@ -983,6 +983,10 @@ class CelebADataset(TaskDataset):
                         cache_valid = False
                         if self.is_master:
                             print(f"Cache {cache_file} img_size={meta.get('img_size')} != config.IMG_SIZE={config.IMG_SIZE}; rebuilding")
+                    if meta.get('dataset_root') != str(self.dataset_root.resolve()):
+                        cache_valid = False
+                        if self.is_master:
+                            print(f"Cache {cache_file} dataset_root={meta.get('dataset_root')} != {self.dataset_root.resolve()}; rebuilding")
                     
                     if cache_valid:
                         self.data = cached['data']
@@ -1035,6 +1039,7 @@ class CelebADataset(TaskDataset):
                         'attributes': self.attributes,
                         'meta': {
                             'img_size': config.IMG_SIZE,
+                            'dataset_root': str(self.dataset_root.resolve()),
                             'cache_version': '1.0',
                             'created_by': f'rank_{self.rank}'
                         }
@@ -1060,6 +1065,8 @@ class CelebADataset(TaskDataset):
                     meta = cached.get('meta', {})
                     if meta.get('img_size') != config.IMG_SIZE:
                         raise ValueError(f"Cache metadata mismatch: img_size {meta.get('img_size')} != {config.IMG_SIZE}")
+                    if meta.get('dataset_root') != str(self.dataset_root.resolve()):
+                        raise ValueError(f"Cache metadata mismatch: dataset_root {meta.get('dataset_root')} != {self.dataset_root.resolve()}")
                     self.data = cached['data']
                     self.attributes = cached['attributes']
         
@@ -1099,7 +1106,7 @@ class MultiLabelDatasetWrapper:
 
 class UTKFaceDataset(TaskDataset):
     """UTKFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('UTKFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'UTKFace'
         utkface_dir = self.data_root / 'UTKFace' if (self.data_root / 'UTKFace').exists() else self.data_root
@@ -1136,7 +1143,7 @@ class UTKFaceDataset(TaskDataset):
 
 class FairFaceDataset(TaskDataset):
     """FairFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('FairFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'FairFace'
         csv_split = 'train' if split == 'train' else 'val'
@@ -1186,7 +1193,7 @@ class FairFaceDataset(TaskDataset):
 
 class COFWDataset(TaskDataset):
     """COFW for visibility. Maps to task 5."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root='datasets'):
         super().__init__('COFW', 'visibility', split, dataset_root)
         self.data_root = self.dataset_root / 'COFW'
         
@@ -1244,7 +1251,7 @@ class COFWDataset(TaskDataset):
 
 class W300VWDataset(TaskDataset):
     """300VW for landmark detection (test only). Maps to task 1."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root='datasets'):
         super().__init__('300VW', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300VW'
         
@@ -1294,7 +1301,7 @@ class W300VWDataset(TaskDataset):
 
 class BIWIDataset(TaskDataset):
     """BIWI for head pose estimation (test only). Maps to task 2."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root='datasets'):
         super().__init__('BIWI', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / 'BIWI'
         
@@ -1349,7 +1356,7 @@ class BIWIDataset(TaskDataset):
 
 class LFWADataset(TaskDataset):
     """LFWA for attributes (test only). Maps to task 3."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root='datasets'):
         super().__init__('LFWA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'LFWA'
         
