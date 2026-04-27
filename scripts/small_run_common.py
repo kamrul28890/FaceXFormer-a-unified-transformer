@@ -267,7 +267,21 @@ def load_checkpoint_if_available(
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
     checkpoint = torch.load(path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    # Supported checkpoint layouts:
+    # - our training code: {"model_state_dict": ...}
+    # - released inference code in this repo: {"state_dict_backbone": ...}
+    # - common PyTorch exports: {"state_dict": ...}
+    # - raw state_dict: {"layer.weight": tensor, ...}
+    if isinstance(checkpoint, dict):
+        state_dict = (
+            checkpoint.get("model_state_dict")
+            or checkpoint.get("state_dict_backbone")
+            or checkpoint.get("state_dict")
+            or checkpoint
+        )
+    else:
+        state_dict = checkpoint
 
     clean_state_dict = OrderedDict()
     for key, value in state_dict.items():
@@ -283,7 +297,7 @@ def load_checkpoint_if_available(
         compatible = OrderedDict()
         skipped = []
         for key, value in clean_state_dict.items():
-            if key in model_state and model_state[key].shape == value.shape:
+            if hasattr(value, "shape") and key in model_state and model_state[key].shape == value.shape:
                 compatible[key] = value
             else:
                 skipped.append(key)
