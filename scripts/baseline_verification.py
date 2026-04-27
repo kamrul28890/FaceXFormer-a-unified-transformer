@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,43 @@ DEFAULT_TASKS = [
     "race",
     "visibility",
 ]
+
+
+def normalize_metric_for_report(task_name, raw_metric, paper_target):
+    """
+    Keep raw script metrics, but also provide report-ready values.
+
+    The current metric functions return mixed units:
+    - segmentation/accuracy/visibility are fractions in [0, 1]
+    - landmark NME is already a percentage
+    - headpose MAE is computed in radians from this repo's Euler labels
+    - age MAE is already in years
+
+    Paper tables report percentages for F1/accuracy/recall, degrees for
+    head-pose MAE, NME percentage for landmarks, and years for age.
+    """
+
+    if raw_metric is None:
+        return None, "", None
+
+    if task_name in {"segmentation", "attribute", "gender", "race", "visibility"}:
+        normalized = raw_metric * 100.0
+        unit = "percent"
+    elif task_name == "headpose":
+        normalized = raw_metric * (180.0 / math.pi)
+        unit = "degrees"
+    elif task_name == "landmark":
+        normalized = raw_metric
+        unit = "nme_percent"
+    elif task_name == "age":
+        normalized = raw_metric
+        unit = "years"
+    else:
+        normalized = raw_metric
+        unit = "raw"
+
+    normalized_gap = None if paper_target is None else normalized - paper_target
+    return normalized, unit, normalized_gap
 
 
 def metric_for_task(task_name, predictions, targets):
@@ -138,6 +176,11 @@ def evaluate_tiny(model, datasets_by_task, criterion, device, batch_size, num_wo
                 target_info = PAPER_TARGETS.get(task_name, {})
                 paper_target = target_info.get("target")
                 gap = None if paper_target is None else avg_metric - paper_target
+                normalized_metric, normalized_unit, normalized_gap = normalize_metric_for_report(
+                    task_name,
+                    avg_metric,
+                    paper_target,
+                )
 
                 rows.append(
                     {
@@ -147,9 +190,14 @@ def evaluate_tiny(model, datasets_by_task, criterion, device, batch_size, num_wo
                         "batches": batches,
                         "loss": avg_loss,
                         "metric": avg_metric,
+                        "gap_metric_minus_target": gap,
+                        "raw_metric": avg_metric,
+                        "raw_gap_metric_minus_target": gap,
+                        "normalized_metric": normalized_metric,
+                        "normalized_metric_unit": normalized_unit,
+                        "normalized_gap_metric_minus_target": normalized_gap,
                         "paper_metric": target_info.get("metric", ""),
                         "paper_target": paper_target,
-                        "gap_metric_minus_target": gap,
                         "seconds": time.time() - started,
                     }
                 )
@@ -166,9 +214,14 @@ def write_csv(path: Path, rows):
         "batches",
         "loss",
         "metric",
+        "gap_metric_minus_target",
+        "raw_metric",
+        "raw_gap_metric_minus_target",
+        "normalized_metric",
+        "normalized_metric_unit",
+        "normalized_gap_metric_minus_target",
         "paper_metric",
         "paper_target",
-        "gap_metric_minus_target",
         "seconds",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -233,7 +286,8 @@ def main():
     for row in rows:
         print(
             f"  {row['task']:12s} {row['dataset'][:32]:32s} "
-            f"n={row['samples']:4d} loss={row['loss']:.4f} metric={row['metric']:.4f}"
+            f"n={row['samples']:4d} loss={row['loss']:.4f} "
+            f"raw={row['raw_metric']:.4f} normalized={row['normalized_metric']:.4f} {row['normalized_metric_unit']}"
         )
 
 
