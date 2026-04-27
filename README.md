@@ -2,7 +2,7 @@
 
 Local reproduction scaffold for **FaceXFormer: A Unified Transformer for Multi-Task Facial Analysis**.
 
-This repository currently contains an 8-task training/evaluation implementation plus tiny baseline and ablation scripts for local verification before running full experiments on a GPU cluster.
+This repository currently contains an 8-task training/evaluation implementation plus baseline and tiny ablation scripts for local verification before running full experiments on a GPU cluster.
 
 GitHub remote:
 
@@ -50,9 +50,10 @@ See [to-dos.md](to-dos.md) for the reproduction roadmap.
 |       |-- facexformer.py            # Swin-B + FaceX decoder model
 |       `-- transformer.py            # Two-way attention decoder blocks
 |-- scripts/
-|   |-- baseline_verification.py      # Tiny baseline/eval smoke runner
+|   |-- baseline_current_8task.py     # Current 8-task baseline/eval runner
+|   |-- baseline_verification.py      # Backward-compatible wrapper
 |   |-- ablation_study_tiny.py        # Tiny ablation train/eval runner
-|   `-- small_run_common.py           # Shared tiny-run helpers
+|   `-- small_run_common.py           # Shared run helpers
 |-- docs/                             # Original project page assets
 |-- requirements.txt                  # Working local requirements
 `-- to-dos.md                         # Reproduction checklist
@@ -102,7 +103,7 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")
 
 ## Dataset Layout
 
-The tiny-run scripts default to:
+The baseline and ablation scripts default to:
 
 ```text
 datasets/
@@ -132,14 +133,14 @@ datasets/
 
 The main dataset classes still contain some legacy defaults pointing at `../facexformer-my/datasets`; the tiny scripts pass the repo-local dataset root explicitly.
 
-## Tiny Baseline Verification
+## Current 8-Task Baseline Verification
 
-Use this to verify dataset loading, model forward pass, loss, and metrics on a very small subset.
+Use this to verify dataset loading, model forward pass, loss, and metrics for the current 8-task implementation. Add `--max-samples` for a quick subset run, or use `--max-samples 0` for all available samples in each selected split.
 
 Smoke test without a checkpoint:
 
 ```powershell
-python scripts\baseline_verification.py `
+python scripts\baseline_current_8task.py `
   --tasks landmark `
   --max-samples 4 `
   --batch-size 1 `
@@ -149,7 +150,7 @@ python scripts\baseline_verification.py `
 Broader smoke test:
 
 ```powershell
-python scripts\baseline_verification.py `
+python scripts\baseline_current_8task.py `
   --tasks segmentation landmark headpose attribute `
   --max-samples 4 `
   --batch-size 1 `
@@ -159,7 +160,7 @@ python scripts\baseline_verification.py `
 With a checkpoint:
 
 ```powershell
-python scripts\baseline_verification.py `
+python scripts\baseline_current_8task.py `
   --checkpoint checkpoints\best_model.pth `
   --allow-partial-checkpoint `
   --tasks segmentation landmark headpose attribute age gender race visibility `
@@ -171,11 +172,13 @@ python scripts\baseline_verification.py `
 Outputs:
 
 ```text
-results/baseline_tiny/gap_analysis_baseline_tiny.csv
-results/baseline_tiny/gap_analysis_baseline_tiny.json
+results/baseline_current_8task/gap_analysis_baseline_current_8task.csv
+results/baseline_current_8task/gap_analysis_baseline_current_8task.json
+results/baseline_current_8task/baseline_current_8task_manifest.json
+results/baseline_current_8task/baseline_current_8task_manifest.md
 ```
 
-Without a checkpoint, metrics are not meaningful; this is only a pipeline smoke test.
+Without a checkpoint, metrics are not meaningful; that mode is only a pipeline smoke test.
 
 ## Tiny Ablation Study
 
@@ -269,7 +272,7 @@ The original dependency list included several conda/Linux-specific or legacy pac
 - `mkl-service`
 - `triton`
 
-`mxnet==1.6.0` is only relevant for possible legacy face-recognition data conversion workflows and has outdated dependency metadata. It is not required for the tiny baseline or ablation runners.
+`mxnet==1.6.0` is only relevant for possible legacy face-recognition data conversion workflows and has outdated dependency metadata. It is not required for the current 8-task baseline or tiny ablation runners.
 
 ## License and Attribution
 

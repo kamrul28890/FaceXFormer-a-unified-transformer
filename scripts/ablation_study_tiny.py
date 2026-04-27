@@ -35,7 +35,7 @@ from config import config
 from datasets import create_multi_task_dataloader
 from losses import MultiTaskLoss
 from network.models.facexformer import FaceXFormer
-from scripts.baseline_verification import evaluate_tiny
+from scripts.baseline_current_8task import evaluate_current_8task
 from scripts.small_run_common import (
     build_eval_datasets,
     build_train_datasets,
@@ -228,7 +228,7 @@ def main():
 
         criterion = MultiTaskLoss(loss_weights_for_variant(variant)).to(device)
         train_rows = train_tiny_variant(model, train_datasets, criterion, device, args, variant)
-        eval_rows = evaluate_tiny(model, eval_datasets, criterion, device, args.batch_size, args.num_workers)
+        eval_rows = evaluate_current_8task(model, eval_datasets, criterion, device, args.batch_size, args.num_workers)
 
         for row in eval_rows:
             row["variant"] = variant

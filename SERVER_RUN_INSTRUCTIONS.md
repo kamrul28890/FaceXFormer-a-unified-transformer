@@ -56,7 +56,7 @@ Datasets should live under:
 datasets/
 ```
 
-The tiny-run scripts also auto-detect a nested full copy:
+The baseline and ablation scripts also auto-detect a nested full copy:
 
 ```text
 datasets/datasets/
@@ -90,10 +90,10 @@ Important: datasets are intentionally ignored by Git. Do not commit dataset file
 
 ## 4. First Smoke Tests
 
-Run a tiny baseline verification first. This checks dataset loading, model creation, forward pass, loss, and metrics.
+Run a small current 8-task baseline verification first. This checks dataset loading, model creation, forward pass, loss, and metrics.
 
 ```bash
-python scripts/baseline_verification.py \
+python scripts/baseline_current_8task.py \
   --tasks landmark \
   --max-samples 4 \
   --batch-size 1 \
@@ -103,7 +103,7 @@ python scripts/baseline_verification.py \
 Then test a slightly wider subset:
 
 ```bash
-python scripts/baseline_verification.py \
+python scripts/baseline_current_8task.py \
   --tasks segmentation landmark headpose attribute \
   --max-samples 4 \
   --batch-size 1 \
@@ -113,8 +113,10 @@ python scripts/baseline_verification.py \
 Outputs:
 
 ```text
-results/baseline_tiny/gap_analysis_baseline_tiny.csv
-results/baseline_tiny/gap_analysis_baseline_tiny.json
+results/baseline_current_8task/gap_analysis_baseline_current_8task.csv
+results/baseline_current_8task/gap_analysis_baseline_current_8task.json
+results/baseline_current_8task/baseline_current_8task_manifest.json
+results/baseline_current_8task/baseline_current_8task_manifest.md
 ```
 
 Without a checkpoint, these metrics are only smoke-test metrics. They are not scientifically meaningful.
@@ -164,7 +166,7 @@ results/ablation_tiny/<variant>/tiny_checkpoint_last.pth
 If a checkpoint is available:
 
 ```bash
-python scripts/baseline_verification.py \
+python scripts/baseline_current_8task.py \
   --checkpoint checkpoints/best_model.pth \
   --allow-partial-checkpoint \
   --tasks segmentation landmark headpose attribute age gender race visibility \
@@ -255,7 +257,7 @@ python evaluate.py --checkpoint checkpoints/best_model.pth
 Please send back:
 
 ```text
-results/baseline_tiny/*.csv
+results/baseline_current_8task/*.csv
 results/ablation_tiny/*.csv
 logs/*.out
 logs/*.err

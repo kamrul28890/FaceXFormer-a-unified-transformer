@@ -1,8 +1,9 @@
 """
-Shared helpers for tiny FaceXFormer baseline and ablation runs.
+Shared helpers for FaceXFormer baseline and ablation runs.
 
-These utilities intentionally use very small dataset subsets. They are meant
-for local pipeline verification before running the full datasets on a cluster.
+These utilities support both small local subsets and full available evaluation
+splits. The ablation runner should usually stay tiny on local hardware; the
+baseline runner can be used for either smoke tests or current 8-task eval.
 """
 
 from __future__ import annotations
@@ -48,11 +49,13 @@ class NamedSubset(Dataset):
         n = len(dataset)
         if max_samples <= 0 or max_samples >= n:
             indices = list(range(n))
+            self.selection_label = "all"
         else:
             rng = random.Random(seed)
             indices = list(range(n))
             rng.shuffle(indices)
             indices = sorted(indices[:max_samples])
+            self.selection_label = "subset"
         self.subset = Subset(dataset, indices)
         self.name = name or dataset_name(dataset)
 
@@ -63,7 +66,7 @@ class NamedSubset(Dataset):
         return self.subset[idx]
 
     def get_name(self) -> str:
-        return f"{self.name}[tiny:{len(self)}]"
+        return f"{self.name}[{self.selection_label}:{len(self)}]"
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -125,7 +128,7 @@ def _try_make(factory, task_name: str, missing: List[str]):
 
 def build_eval_datasets(dataset_root: Path, tasks: Iterable[str], max_samples: int, seed: int):
     """
-    Build tiny evaluation datasets for the current 8-task implementation.
+    Build evaluation datasets for the current 8-task implementation.
 
     Expression and face recognition are intentionally not included here because
     the current repo does not have those model heads/losses wired yet.

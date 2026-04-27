@@ -22,5 +22,6 @@ jobs:
             train_simple.py `
             evaluate.py `
             scripts/small_run_common.py `
+            scripts/baseline_current_8task.py `
             scripts/baseline_verification.py `
             scripts/ablation_study_tiny.py
