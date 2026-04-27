@@ -273,29 +273,34 @@ def validate(
 def compute_nme(predictions, ground_truth, image_size=224):
     """
     Compute Normalized Mean Error for landmark prediction.
-    
+    Normalizes by inter-ocular distance (IOD) — the standard for 300W.
+
     Args:
-        predictions: [B, 136] tensor (68 landmarks * 2)
-        ground_truth: [B, 136] tensor
-        image_size: normalization factor (image diagonal)
-    
+        predictions: [B, 136] tensor (68 landmarks * 2), normalized [0,1]
+        ground_truth: [B, 136] tensor, normalized [0,1]
+        image_size: used to convert normalized coords to pixels for IOD
+
     Returns:
-        float: NME value
+        float: NME value (percentage)
     """
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
-    
-    # Reshape to [B, 68, 2]
-    pred_pts = predictions.reshape(-1, 68, 2)
-    gt_pts = ground_truth.reshape(-1, 68, 2)
-    
-    # Compute Euclidean distance for each landmark
-    distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))  # [B, 68]
-    
-    # Normalize by image diagonal (sqrt(224^2 + 224^2))
-    diagonal = np.sqrt(image_size ** 2 + image_size ** 2)
-    nme = np.mean(distances) / diagonal * 100  # Convert to percentage
-    
+
+    # Reshape to [B, 68, 2] — scale to pixel space for meaningful distances
+    pred_pts = predictions.reshape(-1, 68, 2) * image_size
+    gt_pts = ground_truth.reshape(-1, 68, 2) * image_size
+
+    # Per-landmark Euclidean distance: [B, 68]
+    distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))
+
+    # Inter-ocular distance: outer eye corners (indices 36 and 45 for 68-point)
+    iod = np.sqrt(np.sum((gt_pts[:, 45, :] - gt_pts[:, 36, :]) ** 2, axis=1))  # [B]
+    iod = np.maximum(iod, 1e-6)  # avoid division by zero
+
+    # NME per sample, then average
+    nme_per_sample = np.mean(distances, axis=1) / iod  # [B]
+    nme = np.mean(nme_per_sample) * 100  # percentage
+
     return nme
 
 
@@ -320,30 +325,39 @@ def compute_age_from_logits(age_logits):
     return predicted_ages
 
 
-def compute_mae(predictions, ground_truth):
+def compute_mae(predictions, ground_truth, in_radians=False):
     """
     Compute Mean Absolute Error.
-    
+
     Args:
-        predictions: tensor - can be [B], [B, 1], or [B, C] (for age logits)
-        ground_truth: tensor - should be [B] or [B, 1]
-    
+        predictions: tensor - can be [B], [B, 1], or [B, 8] (age logits)
+        ground_truth: tensor - [B] class indices (0-7) for age, or continuous values
+        in_radians: if True, convert the result from radians to degrees
+
     Returns:
-        float: MAE value
+        float: MAE value (in years for age, in degrees for head pose, otherwise native units)
     """
-    # Handle age logits [B, 8] - convert to continuous predictions
+    age_bins = torch.tensor([4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0],
+                            dtype=torch.float32)
+
+    # Age logits [B, 8]: convert both prediction AND ground truth to years
     if len(predictions.shape) == 2 and predictions.shape[1] == 8:
         predictions = compute_age_from_logits(predictions)
+        # ground_truth is class index (0-7); map to bin-centre years
+        gt_idx = ground_truth.long().clamp(0, 7).cpu()
+        ground_truth = age_bins[gt_idx].to(predictions.device)
     elif len(predictions.shape) > 1:
         predictions = predictions.squeeze()
-    
+
     if len(ground_truth.shape) > 1:
         ground_truth = ground_truth.squeeze()
-    
+
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
-    
+
     mae = np.mean(np.abs(predictions - ground_truth))
+    if in_radians:
+        mae = np.degrees(mae)
     return mae
 
 
@@ -404,24 +418,29 @@ def compute_accuracy(predictions, ground_truth):
 
 def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8):
     """
-    Compute recall at a given precision threshold for visibility prediction.
+    Compute recall at a given precision threshold for occlusion detection.
+    Labels use 1=visible, 0=occluded; the metric measures how well the model
+    detects the occluded (minority, harder) class, matching the paper's metric.
     
     Args:
-        predictions: [B, 29] tensor (visibility scores per landmark)
-        ground_truth: [B, 29] tensor (visibility labels, may be continuous)
+        predictions: [B, 29] tensor (visibility scores; high = predicted visible)
+        ground_truth: [B, 29] tensor (visibility labels: 1=visible, 0=occluded)
         target_precision: desired precision threshold (default 0.8)
     
     Returns:
-        float: recall at target precision
+        float: recall of occluded landmarks at target precision
     """
     predictions = torch.sigmoid(predictions).cpu().numpy().flatten()
     ground_truth = ground_truth.cpu().numpy().flatten()
     
-    # Ensure ground_truth is binary (some datasets may have continuous values)
-    ground_truth = (ground_truth > 0.5).astype(int)
+    # Ensure ground_truth is binary and flip to positive=occluded
+    # Labels: 1=visible → invert so 1=occluded for occlusion-detection PR curve
+    ground_truth_occ = 1 - (ground_truth > 0.5).astype(int)
+    # Model output is high for visible → invert score for occlusion detection
+    predictions_occ = 1.0 - predictions
     
-    # Compute precision-recall curve
-    precisions, recalls, thresholds = precision_recall_curve(ground_truth, predictions)
+    # Compute precision-recall curve for occluded class
+    precisions, recalls, thresholds = precision_recall_curve(ground_truth_occ, predictions_occ)
     
     # Find recall at target precision
     idx = np.where(precisions >= target_precision)[0]
@@ -614,8 +633,8 @@ def validate_per_dataset(
                     
                     elif task_name == 'headpose':
                         if 'headpose' in targets:
-                            # Headpose is [yaw, pitch, roll]
-                            metric = compute_mae(headpose_out, targets['headpose'])
+                            # Labels are [pitch, yaw, roll] in radians (300W-LP convention)
+                            metric = compute_mae(headpose_out, targets['headpose'], in_radians=True)
                             dataset_metric += metric
                     
                     elif task_name == 'attribute':
@@ -837,7 +856,7 @@ def main():
     except FileNotFoundError as e:
         if rank == 0:
             print(f"\n❌ Dataset loading error: {e}")
-            print("\nPlease ensure datasets are downloaded and extracted to ./datasets/")
+            print(f"\nPlease ensure datasets are downloaded and extracted to {config.DATASET_ROOT}/")
             print("See README for dataset download instructions.")
         cleanup_distributed()
         return

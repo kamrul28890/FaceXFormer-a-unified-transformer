@@ -164,6 +164,9 @@ class Config:
     # Device
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    # Dataset root (single place to change for all datasets)
+    DATASET_ROOT = './datasets'
+    
     # Checkpoint and logging
     CHECKPOINT_DIR = './checkpoints'
     LOG_DIR = './logs'

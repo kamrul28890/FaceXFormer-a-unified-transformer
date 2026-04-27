@@ -216,7 +216,7 @@ def write_csv(path: Path, rows):
 def main():
     parser = argparse.ArgumentParser(description="Tiny local ablation study runner.")
     parser.add_argument("--local_rank", type=int, default=0, help="Local rank set by torchrun (do not set manually).")
-    parser.add_argument("--dataset-root", default="../facexformer-my/datasets", help="Path to dataset root. Defaults to sibling repo ../facexformer-my/datasets.")
+    parser.add_argument("--dataset-root", default=config.DATASET_ROOT, help=f"Path to dataset root. Defaults to {config.DATASET_ROOT}.")
     parser.add_argument("--checkpoint", default=None, help="Optional starting checkpoint. Omit to start from ImageNet/random task heads.")
     parser.add_argument("--allow-partial-checkpoint", action="store_true", help="Load only shape-compatible checkpoint tensors.")
     parser.add_argument("--tasks", nargs="+", default=DEFAULT_TRAIN_TASKS, help="Training tasks for tiny ablation.")

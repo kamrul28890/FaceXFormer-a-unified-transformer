@@ -844,10 +844,12 @@ def create_multi_task_dataloader(
 # Dataset implementations (simplified versions)
 class TaskDataset(Dataset):
     """Base dataset class."""
-    def __init__(self, dataset_name: str, task_name: str, split: str = 'train', dataset_root: str = './datasets'):
+    def __init__(self, dataset_name: str, task_name: str, split: str = 'train', dataset_root: str = None):
         self.dataset_name = dataset_name
         self.task_name = task_name
         self.split = split
+        if dataset_root is None:
+            dataset_root = config.DATASET_ROOT
         self.dataset_root = Path(dataset_root)
         self.target_size = config.IMG_SIZE if config else 224
         self.data = []
@@ -858,7 +860,7 @@ class TaskDataset(Dataset):
 
 class CelebAMaskHQDataset(TaskDataset):
     """CelebAMask-HQ for face parsing. Maps to task 0 (segmentation)."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('CelebAMaskHQ', 'segmentation', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebAMask-HQ'
         img_dir = self.data_root / 'CelebA-HQ-img'
@@ -899,7 +901,7 @@ class CelebAMaskHQDataset(TaskDataset):
 
 class W300Dataset(TaskDataset):
     """300W for landmarks. Maps to task 1."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('300W', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300w'
         base_path = self.data_root / '300W' if (self.data_root / '300W').exists() else self.data_root
@@ -937,7 +939,7 @@ class W300Dataset(TaskDataset):
 
 class W300LPDataset(TaskDataset):
     """300W-LP for head pose. Maps to task 2."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('300W-LP', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / '300W_LP'
         self.data = []
@@ -962,7 +964,7 @@ class W300LPDataset(TaskDataset):
 
 class CelebADataset(TaskDataset):
     """CelebA for attributes. Maps to task 3."""
-    def __init__(self, split='train', dataset_root='datasets', rank=0, world_size=1):
+    def __init__(self, split='train', dataset_root=None, rank=0, world_size=1):
         super().__init__('CelebA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebA'
         self.rank = rank
@@ -1106,7 +1108,7 @@ class MultiLabelDatasetWrapper:
 
 class UTKFaceDataset(TaskDataset):
     """UTKFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('UTKFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'UTKFace'
         utkface_dir = self.data_root / 'UTKFace' if (self.data_root / 'UTKFace').exists() else self.data_root
@@ -1143,7 +1145,7 @@ class UTKFaceDataset(TaskDataset):
 
 class FairFaceDataset(TaskDataset):
     """FairFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('FairFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'FairFace'
         csv_split = 'train' if split == 'train' else 'val'
@@ -1193,7 +1195,7 @@ class FairFaceDataset(TaskDataset):
 
 class COFWDataset(TaskDataset):
     """COFW for visibility. Maps to task 5."""
-    def __init__(self, split='train', dataset_root='datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('COFW', 'visibility', split, dataset_root)
         self.data_root = self.dataset_root / 'COFW'
         
@@ -1251,7 +1253,7 @@ class COFWDataset(TaskDataset):
 
 class W300VWDataset(TaskDataset):
     """300VW for landmark detection (test only). Maps to task 1."""
-    def __init__(self, split='test', dataset_root='datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('300VW', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300VW'
         
@@ -1301,7 +1303,7 @@ class W300VWDataset(TaskDataset):
 
 class BIWIDataset(TaskDataset):
     """BIWI for head pose estimation (test only). Maps to task 2."""
-    def __init__(self, split='test', dataset_root='datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('BIWI', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / 'BIWI'
         
@@ -1348,7 +1350,8 @@ class BIWIDataset(TaskDataset):
             pitch = math.atan2(-R[2, 0], sy)
             roll = 0
         
-        rotation = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
+        # Match 300W-LP training convention: [pitch, yaw, roll] in radians
+        rotation = torch.tensor([pitch, yaw, roll], dtype=torch.float32)
 
         image = augment_headpose(image, self.target_size, is_train=False)
         return (image, {'headpose': rotation, 'task_id': torch.tensor(2)})
@@ -1356,7 +1359,7 @@ class BIWIDataset(TaskDataset):
 
 class LFWADataset(TaskDataset):
     """LFWA for attributes (test only). Maps to task 3."""
-    def __init__(self, split='test', dataset_root='datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('LFWA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'LFWA'
         

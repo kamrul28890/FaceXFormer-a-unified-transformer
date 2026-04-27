@@ -72,7 +72,7 @@ def metric_for_task(task_name, predictions, targets):
     if task_name == "landmark":
         return compute_nme(predictions["landmark_output"], targets["landmark"])
     if task_name == "headpose":
-        return compute_mae(predictions["headpose_output"], targets["headpose"])
+        return compute_mae(predictions["headpose_output"], targets["headpose"], in_radians=True)
     if task_name == "attribute":
         return compute_accuracy(predictions["attribute_output"], targets["attribute"])
     if task_name == "age":
@@ -179,7 +179,7 @@ def write_csv(path: Path, rows):
 
 def main():
     parser = argparse.ArgumentParser(description="Tiny baseline verification for FaceXFormer.")
-    parser.add_argument("--dataset-root", default="../facexformer-my/datasets", help="Path to dataset root. Defaults to sibling repo ../facexformer-my/datasets.")
+    parser.add_argument("--dataset-root", default=config.DATASET_ROOT, help=f"Path to dataset root. Defaults to {config.DATASET_ROOT}.")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint path. Omit for random-weight smoke test.")
     parser.add_argument("--allow-partial-checkpoint", action="store_true", help="Load only shape-compatible checkpoint tensors.")
     parser.add_argument("--tasks", nargs="+", default=DEFAULT_TASKS, choices=DEFAULT_TASKS, help="Tasks to evaluate.")

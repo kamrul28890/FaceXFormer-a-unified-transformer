@@ -110,8 +110,8 @@ def main():
                         help="Local rank set by torchrun (do not set manually).")
     parser.add_argument("--variant", default="full", choices=VALID_VARIANTS,
                         help="Ablation variant to run. Submit one SLURM job per variant.")
-    parser.add_argument("--dataset-root", default="../facexformer-my/datasets",
-                        help="Path to dataset root. Defaults to sibling repo ../facexformer-my/datasets.")
+    parser.add_argument("--dataset-root", default=config.DATASET_ROOT,
+                        help=f"Path to dataset root. Defaults to {config.DATASET_ROOT}.")
     parser.add_argument("--resume", default=None,
                         help="Resume from a checkpoint inside the variant's output directory.")
     parser.add_argument("--epochs", type=int, default=config.NUM_EPOCHS,

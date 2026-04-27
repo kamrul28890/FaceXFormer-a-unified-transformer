@@ -53,7 +53,6 @@ torchrun --nproc_per_node=1 \
          --master_port=$MASTER_PORT \
          ablation_study.py \
              --variant $ABLATION_VARIANT \
-             --dataset-root ../facexformer-my/datasets \
              --output-dir results/ablation_full
 EOF
 
