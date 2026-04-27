@@ -18,12 +18,14 @@
 #   standard_cross_attention (one attention direction zeroed out)
 #   unbalanced_sampler       (balanced-batch sampler disabled)
 #   uniform_loss             (all task loss weights = 1.0)
+#   no_augmentation          (data augmentation disabled)
 #
 # Submit one job per variant, e.g.:
 #   ABLATION_VARIANT=full                     sbatch submit_ablation_full.slurm
 #   ABLATION_VARIANT=standard_cross_attention sbatch submit_ablation_full.slurm
 #   ABLATION_VARIANT=unbalanced_sampler       sbatch submit_ablation_full.slurm
 #   ABLATION_VARIANT=uniform_loss             sbatch submit_ablation_full.slurm
+#   ABLATION_VARIANT=no_augmentation          sbatch submit_ablation_full.slurm
 # ============================================================================
 ABLATION_VARIANT=${ABLATION_VARIANT:-full}
 

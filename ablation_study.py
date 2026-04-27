@@ -61,7 +61,7 @@ from train import (
 )
 
 
-VALID_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss"]
+VALID_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss", "no_augmentation"]
 
 
 # ---------------------------------------------------------------------------

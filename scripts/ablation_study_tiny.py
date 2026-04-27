@@ -83,7 +83,7 @@ def cleanup_distributed():
 
 
 DEFAULT_TRAIN_TASKS = ["segmentation", "landmark", "headpose"]
-DEFAULT_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss"]
+DEFAULT_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss", "no_augmentation"]
 
 
 class ZeroAttention(torch.nn.Module):
@@ -113,7 +113,7 @@ def apply_variant(model, variant):
             # which keeps embedding statistics similar to the full model and
             # artificially narrows the performance gap.
             layer.norm4 = torch.nn.Identity()
-    elif variant in {"full", "unbalanced_sampler", "uniform_loss"}:
+    elif variant in {"full", "unbalanced_sampler", "uniform_loss", "no_augmentation"}:
         pass
     else:
         raise ValueError(f"Unknown variant: {variant}")
@@ -272,6 +272,16 @@ def main():
         if rank == 0:
             print(f"\n{'=' * 80}\nRunning variant: {variant}\n{'=' * 80}")
         set_seed(args.seed + variant_idx)
+
+        # Set dataset augmentation state based on variant
+        for task_datasets in train_datasets.values():
+            for ds in task_datasets:
+                # Use 'no_aug' to bypass is_train=(self.split == 'train') in datasets.py
+                target_split = 'no_aug' if variant == "no_augmentation" else 'train'
+                if hasattr(ds, 'base_dataset'):
+                    ds.base_dataset.split = target_split
+                else:
+                    ds.split = target_split
 
         # Build a fresh model per variant; apply_variant must run before DDP wrapping.
         raw_model = FaceXFormer().to(device)
