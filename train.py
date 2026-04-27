@@ -277,10 +277,10 @@ def compute_nme(predictions, ground_truth, image_size=224):
     Args:
         predictions: [B, 136] tensor (68 landmarks * 2)
         ground_truth: [B, 136] tensor
-        image_size: normalization factor (image diagonal)
+        image_size: image size used when coordinates are stored as pixels
     
     Returns:
-        float: NME value
+        float: NME percentage
     """
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
@@ -292,8 +292,13 @@ def compute_nme(predictions, ground_truth, image_size=224):
     # Compute Euclidean distance for each landmark
     distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))  # [B, 68]
     
-    # Normalize by image diagonal (sqrt(224^2 + 224^2))
-    diagonal = np.sqrt(image_size ** 2 + image_size ** 2)
+    # The current 300W loader stores landmarks normalized to [0, 1]. Older
+    # helpers assumed pixel coordinates, which made NME artificially tiny.
+    max_abs_coord = max(float(np.max(np.abs(pred_pts))), float(np.max(np.abs(gt_pts))))
+    if max_abs_coord <= 2.0:
+        diagonal = np.sqrt(2.0)
+    else:
+        diagonal = np.sqrt(image_size ** 2 + image_size ** 2)
     nme = np.mean(distances) / diagonal * 100  # Convert to percentage
     
     return nme
@@ -320,6 +325,26 @@ def compute_age_from_logits(age_logits):
     return predicted_ages
 
 
+def compute_age_targets_to_years(ground_truth, device=None):
+    """
+    Convert age bucket labels to their representative age values.
+
+    UTKFace/FairFace loaders in this repo return age as bucket IDs 0..7, while
+    the model predicts logits over the same 8 buckets. For MAE in years, both
+    sides need to be represented in years.
+    """
+
+    if device is None:
+        device = ground_truth.device
+    age_bins = torch.tensor(
+        [4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0],
+        device=device,
+        dtype=torch.float32,
+    )
+    bucket_ids = torch.clamp(ground_truth.long(), 0, 7)
+    return age_bins[bucket_ids]
+
+
 def compute_mae(predictions, ground_truth):
     """
     Compute Mean Absolute Error.
@@ -331,9 +356,10 @@ def compute_mae(predictions, ground_truth):
     Returns:
         float: MAE value
     """
-    # Handle age logits [B, 8] - convert to continuous predictions
+    # Handle age logits [B, 8] - convert predictions and bucket targets to years.
     if len(predictions.shape) == 2 and predictions.shape[1] == 8:
         predictions = compute_age_from_logits(predictions)
+        ground_truth = compute_age_targets_to_years(ground_truth, device=predictions.device)
     elif len(predictions.shape) > 1:
         predictions = predictions.squeeze()
     
@@ -423,10 +449,10 @@ def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8)
     # Compute precision-recall curve
     precisions, recalls, thresholds = precision_recall_curve(ground_truth, predictions)
     
-    # Find recall at target precision
+    # Find the best recall among thresholds that satisfy the target precision.
     idx = np.where(precisions >= target_precision)[0]
     if len(idx) > 0:
-        recall_at_prec = recalls[idx[0]]
+        recall_at_prec = np.max(recalls[idx])
     else:
         recall_at_prec = 0.0
     

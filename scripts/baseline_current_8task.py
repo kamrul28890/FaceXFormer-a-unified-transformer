@@ -128,6 +128,28 @@ def metric_for_task(task_name, predictions, targets):
     raise KeyError(f"Unsupported task: {task_name}")
 
 
+def paper_target_for_dataset(task_name, dataset_name):
+    """Return paper target only when this row matches the paper dataset."""
+
+    target_info = PAPER_TARGETS.get(task_name, {})
+    paper_dataset = target_info.get("dataset")
+    if not paper_dataset:
+        return {}
+
+    dataset_aliases = {
+        "CelebAMask-HQ": ["CelebAMaskHQ", "CelebAMask-HQ"],
+        "300W": ["W300Dataset", "300W"],
+        "BIWI": ["BIWIDataset", "BIWI"],
+        "CelebA": ["CelebADataset", "CelebA"],
+        "UTKFace": ["UTKFaceDataset", "UTKFace"],
+        "COFW": ["COFWDataset", "COFW"],
+    }
+    aliases = dataset_aliases.get(paper_dataset, [paper_dataset])
+    if any(alias in dataset_name for alias in aliases):
+        return target_info
+    return {}
+
+
 def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_size, num_workers):
     """Evaluate selected current 8-task datasets one task at a time."""
 
@@ -149,6 +171,8 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                 total_metric = 0.0
                 batches = 0
                 samples = 0
+                metric_predictions = []
+                metric_targets = []
                 started = time.time()
 
                 for images, targets in loader:
@@ -168,18 +192,31 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                     outputs = model(images, targets, task_ids)
                     predictions = predictions_from_outputs(outputs)
                     loss, _ = criterion(predictions, targets, task_ids, compute_individual=True)
-                    metric = metric_for_task(task_name, predictions, targets)
+                    if task_name == "visibility":
+                        metric_predictions.append(predictions["visibility_output"].detach().cpu())
+                        metric_targets.append(targets["visibility"].detach().cpu())
+                        metric = None
+                    else:
+                        metric = metric_for_task(task_name, predictions, targets)
 
                     total_loss += float(loss.item())
-                    total_metric += float(metric)
+                    if metric is not None:
+                        total_metric += float(metric) * int(images.shape[0])
                     batches += 1
                     samples += int(images.shape[0])
 
                 avg_loss = total_loss / max(batches, 1)
-                avg_metric = total_metric / max(batches, 1)
-                target_info = PAPER_TARGETS.get(task_name, {})
+                if task_name == "visibility" and metric_predictions:
+                    avg_metric = metric_for_task(
+                        task_name,
+                        {"visibility_output": torch.cat(metric_predictions, dim=0)},
+                        {"visibility": torch.cat(metric_targets, dim=0)},
+                    )
+                else:
+                    avg_metric = total_metric / max(samples, 1)
+                dataset_name = dataset.get_name() if hasattr(dataset, "get_name") else dataset.__class__.__name__
+                target_info = paper_target_for_dataset(task_name, dataset_name)
                 paper_target = target_info.get("target")
-                gap = None if paper_target is None else avg_metric - paper_target
                 normalized_metric, normalized_unit, normalized_gap = normalize_metric_for_report(
                     task_name,
                     avg_metric,
@@ -189,14 +226,14 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                 rows.append(
                     {
                         "task": task_name,
-                        "dataset": dataset.get_name() if hasattr(dataset, "get_name") else dataset.__class__.__name__,
+                        "dataset": dataset_name,
                         "samples": samples,
                         "batches": batches,
                         "loss": avg_loss,
                         "metric": avg_metric,
-                        "gap_metric_minus_target": gap,
+                        "gap_metric_minus_target": None,
                         "raw_metric": avg_metric,
-                        "raw_gap_metric_minus_target": gap,
+                        "raw_gap_metric_minus_target": None,
                         "normalized_metric": normalized_metric,
                         "normalized_metric_unit": normalized_unit,
                         "normalized_gap_metric_minus_target": normalized_gap,
@@ -274,17 +311,21 @@ def write_manifest(output_dir: Path, args, checkpoint_loaded, dataset_root, rows
         "metric_columns": {
             "metric": "Original raw script metric, retained for backward compatibility.",
             "raw_metric": "Same value as metric.",
+            "raw_gap_metric_minus_target": "Deprecated mixed-unit gap column; intentionally left blank.",
             "normalized_metric": "Report-ready metric in normalized_metric_unit.",
             "normalized_metric_unit": "percent, degrees, nme_percent, years, or raw.",
-            "normalized_gap_metric_minus_target": "normalized_metric minus paper_target when paper_target is available.",
+            "normalized_gap_metric_minus_target": (
+                "normalized_metric minus paper_target when the row dataset matches "
+                "the paper target dataset."
+            ),
         },
         "normalization_rules": {
             "segmentation": "raw F1 fraction * 100 -> percent",
             "attribute_gender_race": "raw accuracy fraction * 100 -> percent",
             "visibility": "raw recall fraction * 100 -> percent",
             "headpose": "raw radians * 180/pi -> degrees",
-            "landmark": "raw NME already percent",
-            "age": "raw MAE already years",
+            "landmark": "raw NME already percent; normalized-coordinate datasets use sqrt(2) as image diagonal",
+            "age": "raw MAE already years; bucket targets are converted to representative age-bin centers",
         },
     }
 
@@ -306,11 +347,14 @@ def write_manifest(output_dir: Path, args, checkpoint_loaded, dataset_root, rows
         "Metric columns:\n\n"
         "- `metric`: original raw script metric.\n"
         "- `raw_metric`: same as `metric`, explicit name.\n"
+        "- `raw_gap_metric_minus_target`: deprecated mixed-unit gap column, intentionally blank.\n"
         "- `normalized_metric`: report-ready value.\n"
         "- `normalized_metric_unit`: unit for normalized metric.\n"
-        "- `normalized_gap_metric_minus_target`: normalized metric minus paper target.\n\n"
-        "Normalization rules: segmentation/attribute/gender/race/visibility fractions are multiplied by 100; "
-        "headpose radians are converted to degrees; landmark NME remains percent; age MAE remains years.\n",
+        "- `normalized_gap_metric_minus_target`: normalized metric minus paper target when the row dataset matches the paper target dataset.\n\n"
+        "Normalization rules: segmentation/attribute/gender/race fractions are multiplied by 100; "
+        "visibility is computed once over the full dataset as Recall@P80 and multiplied by 100; "
+        "headpose radians are converted to degrees; landmark NME remains percent with normalized-coordinate handling; "
+        "age bucket targets are converted to representative age-bin centers before MAE.\n",
         encoding="utf-8",
     )
 

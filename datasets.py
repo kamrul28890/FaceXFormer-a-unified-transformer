@@ -834,7 +834,9 @@ class COFWDataset(TaskDataset):
                     self.images.append(img_data)
                     
                     landmark_phis = phi_data[:, i]
-                    visibility_values = landmark_phis[2::3]  # 29 visibility values
+                    # COFW stores 29 x coordinates, 29 y coordinates, then
+                    # 29 binary visibility/occlusion flags.
+                    visibility_values = landmark_phis[58:87]
                     self.visibility_labels.append(visibility_values)
         
         if len(self.images) == 0:
