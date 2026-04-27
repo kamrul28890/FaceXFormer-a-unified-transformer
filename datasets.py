@@ -20,7 +20,8 @@ import numpy as np
 from typing import Dict, List, Optional
 import random
 import math
-from PIL import Image
+import cv2
+from PIL import Image, ImageOps, ImageFilter, ImageDraw
 from pathlib import Path
 import pickle
 import pandas as pd
@@ -83,6 +84,394 @@ def simple_augmentation(image, target_size=None):
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
     image = (image - mean) / std
     return image
+
+
+# ---------------------------------------------------------------------------
+# ArcFace 5-point template (112×112), scaled to target_size at runtime.
+# Points: left-eye-centre, right-eye-centre, nose-tip, left-mouth, right-mouth
+# ---------------------------------------------------------------------------
+_ARCFACE_TEMPLATE_112 = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
+
+# Flip index mapping for 68-point IBUG/300W landmarks.
+# FLIP_INDICES_68[i] is the symmetric counterpart of landmark i.
+_FLIP_INDICES_68 = [
+    16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,   # jaw
+    26, 25, 24, 23, 22, 21, 20, 19, 18, 17,                        # eyebrows
+    27, 28, 29, 30,                                                  # nose bridge
+    35, 34, 33, 32, 31,                                             # nose base
+    45, 44, 43, 42, 47, 46,                                         # left eye  → right
+    39, 38, 37, 36, 41, 40,                                         # right eye → left
+    54, 53, 52, 51, 50, 49, 48,                                     # outer upper lip
+    59, 58, 57, 56, 55,                                             # outer lower lip
+    64, 63, 62, 61, 60,                                             # inner upper lip
+    67, 66, 65,                                                     # inner lower lip
+]
+
+
+# ---------------------------------------------------------------------------
+# Low-level geometric helpers (image = PIL, lm = np.ndarray (N,2) in pixels)
+# ---------------------------------------------------------------------------
+
+def _pil_to_tensor(pil_img):
+    """Convert PIL image to normalised ImageNet tensor."""
+    arr = np.array(pil_img).astype(np.float32) / 255.0
+    t = torch.from_numpy(arr).permute(2, 0, 1)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    return (t - mean) / std
+
+
+def _gamma_adjust_pil(pil_img, gamma):
+    """Apply gamma correction to a PIL image."""
+    arr = np.array(pil_img).astype(np.float32) / 255.0
+    arr = np.power(np.clip(arr, 0, 1), gamma)
+    return Image.fromarray((arr * 255).astype(np.uint8))
+
+
+def _rotate_img_lm(pil_img, lm, angle, size):
+    """Rotate PIL image and (N,2) landmarks by *angle* degrees CCW around centre."""
+    pil_img = pil_img.rotate(angle, expand=False)
+    cx, cy = size / 2.0, size / 2.0
+    rad = np.deg2rad(angle)
+    cos_a, sin_a = np.cos(rad), np.sin(rad)
+    xc = lm[:, 0] - cx
+    yc = lm[:, 1] - cy
+    lm_out = lm.copy()
+    lm_out[:, 0] = cos_a * xc - sin_a * yc + cx
+    lm_out[:, 1] = sin_a * xc + cos_a * yc + cy
+    return pil_img, lm_out
+
+
+def _scale_img_lm(pil_img, lm, scale, size):
+    """Scale PIL image and landmarks by *scale* around image centre."""
+    cx, cy = size / 2.0, size / 2.0
+    new_size = max(1, int(size * scale))
+    scaled = pil_img.resize((new_size, new_size), Image.BILINEAR)
+    result = Image.new('RGB', (size, size), (0, 0, 0))
+    px = (size - new_size) // 2
+    py = (size - new_size) // 2
+    result.paste(scaled, (px, py))
+    lm_out = lm.copy()
+    lm_out[:, 0] = (lm[:, 0] - cx) * scale + cx
+    lm_out[:, 1] = (lm[:, 1] - cy) * scale + cy
+    return result, lm_out
+
+
+def _translate_img_lm(pil_img, lm, tx, ty, size):
+    """Translate PIL image and landmarks by (tx, ty) pixels."""
+    result = Image.new('RGB', (size, size), (0, 0, 0))
+    result.paste(pil_img, (int(tx), int(ty)))
+    lm_out = lm.copy()
+    lm_out[:, 0] = lm[:, 0] + tx
+    lm_out[:, 1] = lm[:, 1] + ty
+    return result, lm_out
+
+
+def _flip_img_lm(pil_img, lm, size):
+    """Flip PIL image and 68-point landmarks horizontally."""
+    pil_img = ImageOps.mirror(pil_img)
+    lm_out = lm[_FLIP_INDICES_68].copy()
+    lm_out[:, 0] = size - 1 - lm_out[:, 0]
+    return pil_img, lm_out
+
+
+def _random_occlusion(pil_img, size):
+    """Paste a random-colour rectangle onto the image."""
+    draw = ImageDraw.Draw(pil_img)
+    occ = random.randint(int(size * 0.1), int(size * 0.4))
+    x1 = random.randint(0, size - occ)
+    y1 = random.randint(0, size - occ)
+    color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    draw.rectangle([x1, y1, x1 + occ, y1 + occ], fill=color)
+    return pil_img
+
+
+# ---------------------------------------------------------------------------
+# Task-specific augmentation functions
+# ---------------------------------------------------------------------------
+
+def align_face_arcface(pil_image, landmarks_68, target_size):
+    """
+    Align a face image using 5 keypoints derived from 68-point annotations and
+    the scaled ArcFace template.  Returns (aligned_PIL_image, aligned_landmarks).
+    aligned_landmarks are in [0, target_size] pixel space.
+    Falls back to a plain resize if the transform cannot be estimated.
+    """
+    img_np = np.array(pil_image)
+    H, W = img_np.shape[:2]
+
+    # Derive 5 keypoints from 68 landmarks
+    left_eye   = landmarks_68[36:42].mean(axis=0)
+    right_eye  = landmarks_68[42:48].mean(axis=0)
+    nose_tip   = landmarks_68[30]
+    left_mouth = landmarks_68[48]
+    right_mouth = landmarks_68[54]
+    src_pts = np.array([left_eye, right_eye, nose_tip, left_mouth, right_mouth],
+                       dtype=np.float32)
+
+    dst_pts = _ARCFACE_TEMPLATE_112 * (target_size / 112.0)
+
+    M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.LMEDS)
+    if M is None:
+        # Fallback: simple resize, scale landmarks proportionally
+        img_aligned = cv2.resize(img_np, (target_size, target_size))
+        lm = landmarks_68.copy().astype(np.float32)
+        lm[:, 0] = lm[:, 0] / W * target_size
+        lm[:, 1] = lm[:, 1] / H * target_size
+    else:
+        img_aligned = cv2.warpAffine(img_np, M, (target_size, target_size))
+        ones = np.ones((len(landmarks_68), 1), dtype=np.float32)
+        lm_h = np.concatenate([landmarks_68.astype(np.float32), ones], axis=1)
+        lm = (M @ lm_h.T).T  # (68, 2)
+
+    return Image.fromarray(img_aligned), lm
+
+
+def augment_landmark_detection(pil_image, landmarks_68, target_size, is_train=True):
+    """
+    Full pipeline for the landmark detection task:
+      Train: ArcFace alignment + geometric augmentations + photometric augmentations
+      Test:  ArcFace alignment only (no augmentation)
+
+    Paper augmentations: rotation ±18°, scaling ±10%, translation 5%×size,
+    horizontal flip 50%, gray 20%, Gaussian blur 30%, occlusion 40%, gamma 20%.
+
+    Returns:
+        img_tensor  – (3, target_size, target_size) normalised tensor
+        lm_flat     – (136,) landmark tensor in [0, 1] space
+    """
+    pil_img, lm = align_face_arcface(pil_image, landmarks_68, target_size)
+
+    if is_train:
+        # Random rotation ±18°
+        angle = random.uniform(-18, 18)
+        pil_img, lm = _rotate_img_lm(pil_img, lm, angle, target_size)
+
+        # Random scaling ±10%
+        scale = random.uniform(0.9, 1.1)
+        pil_img, lm = _scale_img_lm(pil_img, lm, scale, target_size)
+
+        # Random translation 5% × target_size
+        tx = random.uniform(-0.05, 0.05) * target_size
+        ty = random.uniform(-0.05, 0.05) * target_size
+        pil_img, lm = _translate_img_lm(pil_img, lm, tx, ty, target_size)
+
+        # Random horizontal flip 50%
+        if random.random() < 0.5:
+            pil_img, lm = _flip_img_lm(pil_img, lm, target_size)
+
+        # Random gray 20%
+        if random.random() < 0.2:
+            pil_img = ImageOps.grayscale(pil_img).convert('RGB')
+
+        # Random Gaussian blur 30%
+        if random.random() < 0.3:
+            pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 2.0)))
+
+        # Random occlusion 40%
+        if random.random() < 0.4:
+            pil_img = _random_occlusion(pil_img, target_size)
+
+        # Random gamma 20%
+        if random.random() < 0.2:
+            pil_img = _gamma_adjust_pil(pil_img, random.uniform(0.7, 1.3))
+
+    lm_norm = np.clip(lm / target_size, 0.0, 1.0)
+    return _pil_to_tensor(pil_img), torch.from_numpy(lm_norm.flatten()).float()
+
+
+def augment_headpose(pil_image, target_size, is_train=True):
+    """
+    Head pose pipeline: resize + loose random-resized crop (train only).
+    Paper augmentations: random resized crop 80–100%, gray 10%, blur 10%, gamma 10%.
+    """
+    pil_image = pil_image.resize((target_size, target_size), Image.BILINEAR)
+
+    if is_train:
+        # Random resized crop 80–100% (loose crop proxy)
+        crop_scale = random.uniform(0.8, 1.0)
+        crop_size = int(target_size * crop_scale)
+        x1 = random.randint(0, target_size - crop_size)
+        y1 = random.randint(0, target_size - crop_size)
+        pil_image = pil_image.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        pil_image = pil_image.resize((target_size, target_size), Image.BILINEAR)
+
+        # Random gray 10%
+        if random.random() < 0.1:
+            pil_image = ImageOps.grayscale(pil_image).convert('RGB')
+
+        # Random Gaussian blur 10%
+        if random.random() < 0.1:
+            pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
+
+        # Random gamma 10%
+        if random.random() < 0.1:
+            pil_image = _gamma_adjust_pil(pil_image, random.uniform(0.7, 1.3))
+
+    return _pil_to_tensor(pil_image)
+
+
+def augment_attributes(pil_image, target_size, is_train=True):
+    """
+    Attribute prediction pipeline.
+    Paper augmentations: rotation ±18°, scaling ±10%, translation 1%×size,
+    flip 50%, gray 10%, blur 10%, gamma 20%.
+    """
+    pil_image = pil_image.resize((target_size, target_size), Image.BILINEAR)
+
+    if is_train:
+        # Random rotation ±18°
+        angle = random.uniform(-18, 18)
+        pil_image = pil_image.rotate(angle, expand=False)
+
+        # Random scaling ±10%
+        scale = random.uniform(0.9, 1.1)
+        new_size = max(1, int(target_size * scale))
+        scaled = pil_image.resize((new_size, new_size), Image.BILINEAR)
+        result = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+        px = (target_size - new_size) // 2
+        py = (target_size - new_size) // 2
+        result.paste(scaled, (px, py))
+        pil_image = result
+
+        # Random translation 1% × target_size
+        tx = int(random.uniform(-0.01, 0.01) * target_size)
+        ty = int(random.uniform(-0.01, 0.01) * target_size)
+        result = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+        result.paste(pil_image, (tx, ty))
+        pil_image = result
+
+        # Random horizontal flip 50%
+        if random.random() < 0.5:
+            pil_image = ImageOps.mirror(pil_image)
+
+        # Random gray 10%
+        if random.random() < 0.1:
+            pil_image = ImageOps.grayscale(pil_image).convert('RGB')
+
+        # Random Gaussian blur 10%
+        if random.random() < 0.1:
+            pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
+
+        # Random gamma 20%
+        if random.random() < 0.2:
+            pil_image = _gamma_adjust_pil(pil_image, random.uniform(0.7, 1.3))
+
+    return _pil_to_tensor(pil_image)
+
+
+def augment_agr(pil_image, target_size, is_train=True):
+    """
+    Age / Gender / Race pipeline.
+    Paper augmentations: rotation ±18°, scaling ±10%, translation 1%×size,
+    flip 50%, gray 10%, blur 10%, gamma 10%.
+    """
+    pil_image = pil_image.resize((target_size, target_size), Image.BILINEAR)
+
+    if is_train:
+        # Random rotation ±18°
+        angle = random.uniform(-18, 18)
+        pil_image = pil_image.rotate(angle, expand=False)
+
+        # Random scaling ±10%
+        scale = random.uniform(0.9, 1.1)
+        new_size = max(1, int(target_size * scale))
+        scaled = pil_image.resize((new_size, new_size), Image.BILINEAR)
+        result = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+        px = (target_size - new_size) // 2
+        py = (target_size - new_size) // 2
+        result.paste(scaled, (px, py))
+        pil_image = result
+
+        # Random translation 1% × target_size
+        tx = int(random.uniform(-0.01, 0.01) * target_size)
+        ty = int(random.uniform(-0.01, 0.01) * target_size)
+        result = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+        result.paste(pil_image, (tx, ty))
+        pil_image = result
+
+        # Random horizontal flip 50%
+        if random.random() < 0.5:
+            pil_image = ImageOps.mirror(pil_image)
+
+        # Random gray 10%
+        if random.random() < 0.1:
+            pil_image = ImageOps.grayscale(pil_image).convert('RGB')
+
+        # Random Gaussian blur 10%
+        if random.random() < 0.1:
+            pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
+
+        # Random gamma 10%
+        if random.random() < 0.1:
+            pil_image = _gamma_adjust_pil(pil_image, random.uniform(0.7, 1.3))
+
+    return _pil_to_tensor(pil_image)
+
+
+# COFW 29-point symmetric flip indices (0-based).
+# _COFW_FLIP_IDX[i] is the landmark that landmark i maps to after a horizontal flip.
+# Pairs: (0,3), (1,2), (4,5), (6,9), (7,8), (11,12), (13,14), (19,22), (20,23),
+#         (21,24), (26,27).  Midline points map to themselves.
+_COFW_FLIP_IDX = [
+    3, 2, 1, 0,          # 0-3  right/left eye corners
+    5, 4,                # 4-5  right/left eye pupils
+    9, 8, 7, 6,          # 6-9  right/left eyebrow corners
+    10,                  # 10   nose tip (midline)
+    12, 11,              # 11-12 right/left nostrils
+    14, 13,              # 13-14 right/left mouth corners
+    15, 16, 17, 18,      # 15-18 lip centres (midline)
+    22, 23, 24, 19, 20, 21,  # 19-24 right→left ear swap
+    25,                  # 25   chin (midline)
+    27, 26,              # 26-27 additional symmetric pair
+    28,                  # 28   remaining midline point
+]
+assert len(_COFW_FLIP_IDX) == 29, "COFW flip index length must be 29"
+
+
+def augment_visibility(pil_image, visibility, target_size, is_train=True):
+    """
+    Visibility prediction pipeline.
+    Paper augmentations: flip 50%, gray 10%, blur 10%, gamma 10%.
+
+    Args:
+        pil_image   – PIL image
+        visibility  – np.ndarray of shape (29,) with visibility labels
+        target_size – output spatial size
+        is_train    – whether to apply random augmentations
+
+    Returns:
+        img_tensor  – (3, target_size, target_size) normalised tensor
+        vis_tensor  – (29,) float32 tensor, reordered if a flip was applied
+    """
+    pil_image = pil_image.resize((target_size, target_size), Image.BILINEAR)
+    vis = np.array(visibility, dtype=np.float32)
+
+    if is_train:
+        # Random horizontal flip 50% — reorder visibility labels to match
+        if random.random() < 0.5:
+            pil_image = ImageOps.mirror(pil_image)
+            vis = vis[_COFW_FLIP_IDX]
+
+        # Random gray 10%
+        if random.random() < 0.1:
+            pil_image = ImageOps.grayscale(pil_image).convert('RGB')
+
+        # Random Gaussian blur 10%
+        if random.random() < 0.1:
+            pil_image = pil_image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
+
+        # Random gamma 10%
+        if random.random() < 0.1:
+            pil_image = _gamma_adjust_pil(pil_image, random.uniform(0.7, 1.3))
+
+    return _pil_to_tensor(pil_image), torch.from_numpy(vis)
 
 
 class UpsampledMultiTaskDataset(Dataset):
@@ -455,10 +844,12 @@ def create_multi_task_dataloader(
 # Dataset implementations (simplified versions)
 class TaskDataset(Dataset):
     """Base dataset class."""
-    def __init__(self, dataset_name: str, task_name: str, split: str = 'train', dataset_root: str = './datasets'):
+    def __init__(self, dataset_name: str, task_name: str, split: str = 'train', dataset_root: str = None):
         self.dataset_name = dataset_name
         self.task_name = task_name
         self.split = split
+        if dataset_root is None:
+            dataset_root = config.DATASET_ROOT
         self.dataset_root = Path(dataset_root)
         self.target_size = config.IMG_SIZE if config else 224
         self.data = []
@@ -469,7 +860,7 @@ class TaskDataset(Dataset):
 
 class CelebAMaskHQDataset(TaskDataset):
     """CelebAMask-HQ for face parsing. Maps to task 0 (segmentation)."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('CelebAMaskHQ', 'segmentation', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebAMask-HQ'
         img_dir = self.data_root / 'CelebA-HQ-img'
@@ -510,7 +901,7 @@ class CelebAMaskHQDataset(TaskDataset):
 
 class W300Dataset(TaskDataset):
     """300W for landmarks. Maps to task 1."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('300W', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300w'
         base_path = self.data_root / '300W' if (self.data_root / '300W').exists() else self.data_root
@@ -538,20 +929,17 @@ class W300Dataset(TaskDataset):
         img_path = self.data[idx]
         image = Image.open(img_path).convert('RGB')
         pts_path = img_path.with_suffix('.pts')
-        landmarks = self._load_pts(pts_path)
-        landmarks[:, 0] /= image.width
-        landmarks[:, 1] /= image.height
-        
-        image = simple_augmentation(image, self.target_size)
-        # Flatten to 136 (68*2)
-        landmarks_flat = torch.from_numpy(landmarks.flatten()).float()
-        
+        landmarks = self._load_pts(pts_path)  # (68, 2) pixel coords
+
+        image, landmarks_flat = augment_landmark_detection(
+            image, landmarks, self.target_size, is_train=(self.split == 'train')
+        )
         return (image, {'landmark': landmarks_flat, 'task_id': torch.tensor(1)})
 
 
 class W300LPDataset(TaskDataset):
     """300W-LP for head pose. Maps to task 2."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('300W-LP', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / '300W_LP'
         self.data = []
@@ -568,16 +956,15 @@ class W300LPDataset(TaskDataset):
         import scipy.io
         pose_data = scipy.io.loadmat(str(mat_path))
         rotation = pose_data['Pose_Para'][0][:3]  # Euler angles
-        
-        image = simple_augmentation(image, self.target_size)
+
+        image = augment_headpose(image, self.target_size, is_train=(self.split == 'train'))
         rotation = torch.from_numpy(rotation).float()
-        
         return (image, {'headpose': rotation, 'task_id': torch.tensor(2)})
 
 
 class CelebADataset(TaskDataset):
     """CelebA for attributes. Maps to task 3."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets', rank=0, world_size=1):
+    def __init__(self, split='train', dataset_root=None, rank=0, world_size=1):
         super().__init__('CelebA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'CelebA'
         self.rank = rank
@@ -587,6 +974,7 @@ class CelebADataset(TaskDataset):
         
         if cache_file.exists():
             # Check cache metadata for compatibility
+            rebuild_cache = False
             try:
                 with open(cache_file, 'rb') as f:
                     cached = pickle.load(f)
@@ -598,21 +986,22 @@ class CelebADataset(TaskDataset):
                         cache_valid = False
                         if self.is_master:
                             print(f"Cache {cache_file} img_size={meta.get('img_size')} != config.IMG_SIZE={config.IMG_SIZE}; rebuilding")
+                    if meta.get('dataset_root') != str(self.dataset_root.resolve()):
+                        cache_valid = False
+                        if self.is_master:
+                            print(f"Cache {cache_file} dataset_root={meta.get('dataset_root')} != {self.dataset_root.resolve()}; rebuilding")
                     
                     if cache_valid:
                         self.data = cached['data']
                         self.attributes = cached['attributes']
                     else:
-                        # Force rebuild by removing cache file
-                        if self.is_master:
-                            cache_file.unlink(missing_ok=True)
-                        raise ValueError("Cache metadata mismatch")
+                        rebuild_cache = True
             except (KeyError, ValueError):
                 # Cache is invalid or missing metadata, rebuild it
-                if self.is_master:
-                    cache_file.unlink(missing_ok=True)
-                # Fall through to rebuild logic
-                pass
+                rebuild_cache = True
+            if rebuild_cache and self.is_master:
+                # On Windows the file must be closed before deletion.
+                cache_file.unlink(missing_ok=True)
         else:
             # Cache doesn't exist, will be built below
             pass
@@ -650,6 +1039,7 @@ class CelebADataset(TaskDataset):
                         'attributes': self.attributes,
                         'meta': {
                             'img_size': config.IMG_SIZE,
+                            'dataset_root': str(self.dataset_root.resolve()),
                             'cache_version': '1.0',
                             'created_by': f'rank_{self.rank}'
                         }
@@ -675,6 +1065,8 @@ class CelebADataset(TaskDataset):
                     meta = cached.get('meta', {})
                     if meta.get('img_size') != config.IMG_SIZE:
                         raise ValueError(f"Cache metadata mismatch: img_size {meta.get('img_size')} != {config.IMG_SIZE}")
+                    if meta.get('dataset_root') != str(self.dataset_root.resolve()):
+                        raise ValueError(f"Cache metadata mismatch: dataset_root {meta.get('dataset_root')} != {self.dataset_root.resolve()}")
                     self.data = cached['data']
                     self.attributes = cached['attributes']
         
@@ -685,8 +1077,8 @@ class CelebADataset(TaskDataset):
         img_path = self.data[idx]
         image = Image.open(img_path).convert('RGB')
         attributes = torch.tensor(self.attributes[idx], dtype=torch.float32)
-        
-        image = simple_augmentation(image, self.target_size)
+
+        image = augment_attributes(image, self.target_size, is_train=(self.split == 'train'))
         return (image, {'attribute': attributes, 'task_id': torch.tensor(3)})
 
 
@@ -714,7 +1106,7 @@ class MultiLabelDatasetWrapper:
 
 class UTKFaceDataset(TaskDataset):
     """UTKFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('UTKFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'UTKFace'
         utkface_dir = self.data_root / 'UTKFace' if (self.data_root / 'UTKFace').exists() else self.data_root
@@ -741,17 +1133,17 @@ class UTKFaceDataset(TaskDataset):
         image = Image.open(img_path).convert('RGB')
         parts = img_path.stem.split('_')
         age, gender, race = int(parts[0]), int(parts[1]), int(parts[2])
-        
+
         # Convert age to bucket index (0-7)
         age_bucket = age_to_bucket(age)
-        
-        image = simple_augmentation(image, self.target_size)
+
+        image = augment_agr(image, self.target_size, is_train=(self.split == 'train'))
         return (image, {'age': age_bucket, 'gender': gender, 'race': race})
 
 
 class FairFaceDataset(TaskDataset):
     """FairFace for age/gender/race."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('FairFace', 'age_gender_race', split, dataset_root)
         self.data_root = self.dataset_root / 'FairFace'
         csv_split = 'train' if split == 'train' else 'val'
@@ -794,14 +1186,14 @@ class FairFaceDataset(TaskDataset):
         img_path = self.data[idx]
         image = Image.open(img_path).convert('RGB')
         labels = self.labels[idx]
-        
-        image = simple_augmentation(image, self.target_size)
+
+        image = augment_agr(image, self.target_size, is_train=(self.split == 'train'))
         return (image, {'age': labels['age'], 'gender': labels['gender'], 'race': labels['race']})
 
 
 class COFWDataset(TaskDataset):
     """COFW for visibility. Maps to task 5."""
-    def __init__(self, split='train', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='train', dataset_root=None):
         super().__init__('COFW', 'visibility', split, dataset_root)
         self.data_root = self.dataset_root / 'COFW'
         
@@ -851,17 +1243,17 @@ class COFWDataset(TaskDataset):
             img_data = np.stack([img_data, img_data, img_data], axis=-1)
         
         image = Image.fromarray(img_data.astype(np.uint8))
-        visibility = self.visibility_labels[idx]
-        
-        image = simple_augmentation(image, self.target_size)
-        visibility = torch.tensor(visibility, dtype=torch.float32)  # Shape: [29]
-        
-        return (image, {'visibility': visibility, 'task_id': torch.tensor(7)})
+        visibility = self.visibility_labels[idx]  # np.ndarray (29,)
+
+        image, visibility_tensor = augment_visibility(
+            image, visibility, self.target_size, is_train=(self.split == 'train')
+        )
+        return (image, {'visibility': visibility_tensor, 'task_id': torch.tensor(7)})
 
 
 class W300VWDataset(TaskDataset):
     """300VW for landmark detection (test only). Maps to task 1."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('300VW', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300VW'
         
@@ -900,19 +1292,18 @@ class W300VWDataset(TaskDataset):
     def __getitem__(self, idx):
         img_path, pts_path = self.data[idx]
         image = Image.open(img_path).convert('RGB')
-        landmarks = self._load_pts(pts_path)
-        landmarks[:, 0] /= image.width
-        landmarks[:, 1] /= image.height
-        
-        image = simple_augmentation(image, self.target_size)
-        landmarks_flat = torch.from_numpy(landmarks.flatten()).float()
-        
+        landmarks = self._load_pts(pts_path)  # (68, 2) pixel coords
+
+        # Test set: alignment only, no augmentation
+        image, landmarks_flat = augment_landmark_detection(
+            image, landmarks, self.target_size, is_train=False
+        )
         return (image, {'landmark': landmarks_flat, 'task_id': torch.tensor(1)})
 
 
 class BIWIDataset(TaskDataset):
     """BIWI for head pose estimation (test only). Maps to task 2."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('BIWI', 'headpose', split, dataset_root)
         self.data_root = self.dataset_root / 'BIWI'
         
@@ -959,15 +1350,16 @@ class BIWIDataset(TaskDataset):
             pitch = math.atan2(-R[2, 0], sy)
             roll = 0
         
-        rotation = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
-        
-        image = simple_augmentation(image, self.target_size)
+        # Match 300W-LP training convention: [pitch, yaw, roll] in radians
+        rotation = torch.tensor([pitch, yaw, roll], dtype=torch.float32)
+
+        image = augment_headpose(image, self.target_size, is_train=False)
         return (image, {'headpose': rotation, 'task_id': torch.tensor(2)})
 
 
 class LFWADataset(TaskDataset):
     """LFWA for attributes (test only). Maps to task 3."""
-    def __init__(self, split='test', dataset_root='../facexformer-my/datasets'):
+    def __init__(self, split='test', dataset_root=None):
         super().__init__('LFWA', 'attribute', split, dataset_root)
         self.data_root = self.dataset_root / 'LFWA'
         
@@ -1010,11 +1402,12 @@ class LFWADataset(TaskDataset):
         
         if len(self.data) == 0 and split == 'test':
             raise FileNotFoundError(f"LFWA dataset not found at {self.data_root}")
-    
+
     def __getitem__(self, idx):
         img_path = self.data[idx]
         image = Image.open(img_path).convert('RGB')
         attributes = torch.tensor(self.attributes[idx], dtype=torch.float32)
-        
-        image = simple_augmentation(image, self.target_size)
+
+        # Test set: no augmentation
+        image = augment_attributes(image, self.target_size, is_train=False)
         return (image, {'attribute': attributes, 'task_id': torch.tensor(3)})

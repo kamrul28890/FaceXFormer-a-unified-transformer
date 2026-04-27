@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import math
 import sys
 import time
 from pathlib import Path
@@ -76,7 +75,7 @@ def normalize_metric_for_report(task_name, raw_metric, paper_target):
     The current metric functions return mixed units:
     - segmentation/accuracy/visibility are fractions in [0, 1]
     - landmark NME is already a percentage
-    - headpose MAE is computed in radians from this repo's Euler labels
+    - headpose MAE is reported in degrees
     - age MAE is already in years
 
     Paper tables report percentages for F1/accuracy/recall, degrees for
@@ -90,7 +89,7 @@ def normalize_metric_for_report(task_name, raw_metric, paper_target):
         normalized = raw_metric * 100.0
         unit = "percent"
     elif task_name == "headpose":
-        normalized = raw_metric * (180.0 / math.pi)
+        normalized = raw_metric
         unit = "degrees"
     elif task_name == "landmark":
         normalized = raw_metric
@@ -114,7 +113,7 @@ def metric_for_task(task_name, predictions, targets):
     if task_name == "landmark":
         return compute_nme(predictions["landmark_output"], targets["landmark"])
     if task_name == "headpose":
-        return compute_mae(predictions["headpose_output"], targets["headpose"])
+        return compute_mae(predictions["headpose_output"], targets["headpose"], in_radians=True)
     if task_name == "attribute":
         return compute_accuracy(predictions["attribute_output"], targets["attribute"])
     if task_name == "age":
@@ -323,7 +322,7 @@ def write_manifest(output_dir: Path, args, checkpoint_loaded, dataset_root, rows
             "segmentation": "raw F1 fraction * 100 -> percent",
             "attribute_gender_race": "raw accuracy fraction * 100 -> percent",
             "visibility": "raw recall fraction * 100 -> percent",
-            "headpose": "raw radians * 180/pi -> degrees",
+            "headpose": "raw MAE already degrees",
             "landmark": "raw NME already percent; normalized-coordinate datasets use sqrt(2) as image diagonal",
             "age": "raw MAE already years; bucket targets are converted to representative age-bin centers",
         },
@@ -353,7 +352,7 @@ def write_manifest(output_dir: Path, args, checkpoint_loaded, dataset_root, rows
         "- `normalized_gap_metric_minus_target`: normalized metric minus paper target when the row dataset matches the paper target dataset.\n\n"
         "Normalization rules: segmentation/attribute/gender/race fractions are multiplied by 100; "
         "visibility is computed once over the full dataset as Recall@P80 and multiplied by 100; "
-        "headpose radians are converted to degrees; landmark NME remains percent with normalized-coordinate handling; "
+        "headpose MAE is reported in degrees; landmark NME remains percent with normalized-coordinate handling; "
         "age bucket targets are converted to representative age-bin centers before MAE.\n",
         encoding="utf-8",
     )

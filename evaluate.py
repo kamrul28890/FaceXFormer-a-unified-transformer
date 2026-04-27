@@ -98,7 +98,7 @@ def main():
     except FileNotFoundError as e:
         if rank == 0:
             print(f"\n❌ Dataset loading error: {e}")
-            print("\nPlease ensure datasets are downloaded and extracted to ./datasets/")
+            print(f"\nPlease ensure datasets are downloaded and extracted to {config.DATASET_ROOT}/")
         cleanup_distributed()
         return
     

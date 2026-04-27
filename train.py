@@ -8,6 +8,15 @@ Features:
 - Task-specific loss weighting
 - Automatic GPU memory configuration
 - Checkpoint saving and loading
+
+Usage (single GPU):
+    python train.py
+
+Usage (standalone multi-GPU via torchrun):
+    torchrun --nproc_per_node=4 train.py
+
+Usage via SLURM (see submit_job.slurm):
+    sbatch submit_job.slurm
 """
 
 from typing import Dict
@@ -273,34 +282,34 @@ def validate(
 def compute_nme(predictions, ground_truth, image_size=224):
     """
     Compute Normalized Mean Error for landmark prediction.
-    
+    Normalizes by inter-ocular distance (IOD) — the standard for 300W.
+
     Args:
-        predictions: [B, 136] tensor (68 landmarks * 2)
-        ground_truth: [B, 136] tensor
-        image_size: image size used when coordinates are stored as pixels
-    
+        predictions: [B, 136] tensor (68 landmarks * 2), normalized [0,1]
+        ground_truth: [B, 136] tensor, normalized [0,1]
+        image_size: used to convert normalized coords to pixels for IOD
+
     Returns:
-        float: NME percentage
+        float: NME value (percentage)
     """
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
-    
-    # Reshape to [B, 68, 2]
-    pred_pts = predictions.reshape(-1, 68, 2)
-    gt_pts = ground_truth.reshape(-1, 68, 2)
-    
-    # Compute Euclidean distance for each landmark
-    distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))  # [B, 68]
-    
-    # The current 300W loader stores landmarks normalized to [0, 1]. Older
-    # helpers assumed pixel coordinates, which made NME artificially tiny.
-    max_abs_coord = max(float(np.max(np.abs(pred_pts))), float(np.max(np.abs(gt_pts))))
-    if max_abs_coord <= 2.0:
-        diagonal = np.sqrt(2.0)
-    else:
-        diagonal = np.sqrt(image_size ** 2 + image_size ** 2)
-    nme = np.mean(distances) / diagonal * 100  # Convert to percentage
-    
+
+    # Reshape to [B, 68, 2] — scale to pixel space for meaningful distances
+    pred_pts = predictions.reshape(-1, 68, 2) * image_size
+    gt_pts = ground_truth.reshape(-1, 68, 2) * image_size
+
+    # Per-landmark Euclidean distance: [B, 68]
+    distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))
+
+    # Inter-ocular distance: outer eye corners (indices 36 and 45 for 68-point)
+    iod = np.sqrt(np.sum((gt_pts[:, 45, :] - gt_pts[:, 36, :]) ** 2, axis=1))  # [B]
+    iod = np.maximum(iod, 1e-6)  # avoid division by zero
+
+    # NME per sample, then average
+    nme_per_sample = np.mean(distances, axis=1) / iod  # [B]
+    nme = np.mean(nme_per_sample) * 100  # percentage
+
     return nme
 
 
@@ -325,51 +334,39 @@ def compute_age_from_logits(age_logits):
     return predicted_ages
 
 
-def compute_age_targets_to_years(ground_truth, device=None):
-    """
-    Convert age bucket labels to their representative age values.
-
-    UTKFace/FairFace loaders in this repo return age as bucket IDs 0..7, while
-    the model predicts logits over the same 8 buckets. For MAE in years, both
-    sides need to be represented in years.
-    """
-
-    if device is None:
-        device = ground_truth.device
-    age_bins = torch.tensor(
-        [4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0],
-        device=device,
-        dtype=torch.float32,
-    )
-    bucket_ids = torch.clamp(ground_truth.long(), 0, 7)
-    return age_bins[bucket_ids]
-
-
-def compute_mae(predictions, ground_truth):
+def compute_mae(predictions, ground_truth, in_radians=False):
     """
     Compute Mean Absolute Error.
-    
+
     Args:
-        predictions: tensor - can be [B], [B, 1], or [B, C] (for age logits)
-        ground_truth: tensor - should be [B] or [B, 1]
-    
+        predictions: tensor - can be [B], [B, 1], or [B, 8] (age logits)
+        ground_truth: tensor - [B] class indices (0-7) for age, or continuous values
+        in_radians: if True, convert the result from radians to degrees
+
     Returns:
-        float: MAE value
+        float: MAE value (in years for age, in degrees for head pose, otherwise native units)
     """
-    # Handle age logits [B, 8] - convert predictions and bucket targets to years.
+    age_bins = torch.tensor([4.5, 14.5, 24.5, 34.5, 44.5, 54.5, 64.5, 75.0],
+                            dtype=torch.float32)
+
+    # Age logits [B, 8]: convert both prediction AND ground truth to years
     if len(predictions.shape) == 2 and predictions.shape[1] == 8:
         predictions = compute_age_from_logits(predictions)
-        ground_truth = compute_age_targets_to_years(ground_truth, device=predictions.device)
+        # ground_truth is class index (0-7); map to bin-centre years
+        gt_idx = ground_truth.long().clamp(0, 7).cpu()
+        ground_truth = age_bins[gt_idx].to(predictions.device)
     elif len(predictions.shape) > 1:
         predictions = predictions.squeeze()
-    
+
     if len(ground_truth.shape) > 1:
         ground_truth = ground_truth.squeeze()
-    
+
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
-    
+
     mae = np.mean(np.abs(predictions - ground_truth))
+    if in_radians:
+        mae = np.degrees(mae)
     return mae
 
 
@@ -430,29 +427,34 @@ def compute_accuracy(predictions, ground_truth):
 
 def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8):
     """
-    Compute recall at a given precision threshold for visibility prediction.
+    Compute recall at a given precision threshold for occlusion detection.
+    Labels use 1=visible, 0=occluded; the metric measures how well the model
+    detects the occluded (minority, harder) class, matching the paper's metric.
     
     Args:
-        predictions: [B, 29] tensor (visibility scores per landmark)
-        ground_truth: [B, 29] tensor (visibility labels, may be continuous)
+        predictions: [B, 29] tensor (visibility scores; high = predicted visible)
+        ground_truth: [B, 29] tensor (visibility labels: 1=visible, 0=occluded)
         target_precision: desired precision threshold (default 0.8)
     
     Returns:
-        float: recall at target precision
+        float: recall of occluded landmarks at target precision
     """
     predictions = torch.sigmoid(predictions).cpu().numpy().flatten()
     ground_truth = ground_truth.cpu().numpy().flatten()
     
-    # Ensure ground_truth is binary (some datasets may have continuous values)
-    ground_truth = (ground_truth > 0.5).astype(int)
+    # Ensure ground_truth is binary and flip to positive=occluded
+    # Labels: 1=visible → invert so 1=occluded for occlusion-detection PR curve
+    ground_truth_occ = 1 - (ground_truth > 0.5).astype(int)
+    # Model output is high for visible → invert score for occlusion detection
+    predictions_occ = 1.0 - predictions
     
-    # Compute precision-recall curve
-    precisions, recalls, thresholds = precision_recall_curve(ground_truth, predictions)
+    # Compute precision-recall curve for occluded class
+    precisions, recalls, thresholds = precision_recall_curve(ground_truth_occ, predictions_occ)
     
-    # Find the best recall among thresholds that satisfy the target precision.
+    # Find recall at target precision
     idx = np.where(precisions >= target_precision)[0]
     if len(idx) > 0:
-        recall_at_prec = np.max(recalls[idx])
+        recall_at_prec = recalls[idx[0]]
     else:
         recall_at_prec = 0.0
     
@@ -640,8 +642,8 @@ def validate_per_dataset(
                     
                     elif task_name == 'headpose':
                         if 'headpose' in targets:
-                            # Headpose is [yaw, pitch, roll]
-                            metric = compute_mae(headpose_out, targets['headpose'])
+                            # Labels are [pitch, yaw, roll] in radians (300W-LP convention)
+                            metric = compute_mae(headpose_out, targets['headpose'], in_radians=True)
                             dataset_metric += metric
                     
                     elif task_name == 'attribute':
@@ -863,7 +865,7 @@ def main():
     except FileNotFoundError as e:
         if rank == 0:
             print(f"\n❌ Dataset loading error: {e}")
-            print("\nPlease ensure datasets are downloaded and extracted to ./datasets/")
+            print(f"\nPlease ensure datasets are downloaded and extracted to {config.DATASET_ROOT}/")
             print("See README for dataset download instructions.")
         cleanup_distributed()
         return
@@ -879,36 +881,12 @@ def main():
         world_size=world_size
     )
     
-    # DEBUG: Verify distributed sampling is working
     if rank == 0:
-        print(f"\n🔍 DATALOADER VERIFICATION:")
-        print(f"  Batches per GPU (rank 0): {len(train_loader)}")
+        print(f"\n🔍 DATALOADER INFO:")
+        print(f"  Batches per GPU: {len(train_loader)}")
         print(f"  Batch size per GPU: {config.BATCH_SIZE}")
         print(f"  World size: {world_size}")
         print(f"  Total samples per epoch: {len(train_loader) * config.BATCH_SIZE * world_size}")
-    
-    # All ranks check their first batch to ensure different data
-    if world_size > 1:
-        for batch_idx, (images, targets) in enumerate(train_loader):
-            if batch_idx == 0:
-                # Get first sample index or task_id as identifier
-                task_ids = targets['task_id']
-                first_task_id = task_ids[0].item()
-                
-                # Gather from all ranks to verify they're different
-                all_first_ids = [None] * world_size
-                dist.all_gather_object(all_first_ids, first_task_id)
-                
-                if rank == 0:
-                    print(f"\n  First batch task_ids from each GPU: {all_first_ids}")
-                    if len(set(all_first_ids)) < world_size:
-                        print(f"  ⚠️ WARNING: Some GPUs have identical first batches!")
-                        print(f"  DistributedSampler may not be working correctly!")
-                    else:
-                        print(f"  ✅ All GPUs have different data - DistributedSampler working!")
-                
-                dist.barrier()
-            break
     
     test_loader = create_multi_task_dataloader(
         test_datasets,

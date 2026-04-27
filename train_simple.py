@@ -92,7 +92,7 @@ def main():
         
     except FileNotFoundError as e:
         print(f"\n❌ Error: {e}")
-        print("\nPlease download and extract datasets to ./datasets/")
+        print(f"\nPlease download and extract datasets to {config.DATASET_ROOT}/")
         return
     
     # Create data loader

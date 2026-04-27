@@ -9,8 +9,11 @@ variants for a few batches to verify:
 - loss-weight options
 - approximate attention ablation plumbing
 
-Recommended first run:
+Recommended first run (single GPU):
     python scripts/ablation_study_tiny.py --variants full standard_cross_attention unbalanced_sampler uniform_loss --max-samples 8 --max-train-batches 2 --epochs 1
+
+Usage (standalone multi-GPU via torchrun):
+    torchrun --nproc_per_node=4 scripts/ablation_study_tiny.py --variants full standard_cross_attention unbalanced_sampler uniform_loss --max-samples 8 --max-train-batches 2 --epochs 1
 
 Later, keep this script structure but increase samples/epochs on a cloud or
 cluster machine.
@@ -28,8 +31,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import os
+import warnings
+
 import torch
+import torch.distributed as dist
 import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+warnings.filterwarnings('ignore', message='Grad strides do not match bucket view strides')
 
 from config import config
 from datasets import create_multi_task_dataloader
@@ -47,8 +57,36 @@ from scripts.small_run_common import (
 )
 
 
+def setup_distributed():
+    """Initialize distributed training (mirrors train.py)."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        return 0, 1, 0
+
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        world_size=world_size,
+        rank=rank,
+        device_id=device,
+    )
+    dist.barrier()
+    return rank, world_size, local_rank
+
+
+def cleanup_distributed():
+    """Tear down the distributed process group."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 DEFAULT_TRAIN_TASKS = ["segmentation", "landmark", "headpose"]
-DEFAULT_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss"]
+DEFAULT_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uniform_loss", "no_augmentation"]
 
 
 class ZeroAttention(torch.nn.Module):
@@ -71,7 +109,14 @@ def apply_variant(model, variant):
     if variant == "standard_cross_attention":
         for layer in model.face_decoder.transformer.layers:
             layer.cross_attn_image_to_token = ZeroAttention()
-    elif variant in {"full", "unbalanced_sampler", "uniform_loss"}:
+            # norm4 is the LayerNorm paired with cross_attn_image_to_token.  In true
+            # standard cross-attention this entire block doesn't exist, so image
+            # embeddings must pass through unchanged.  Leaving norm4 active
+            # normalises the keys every layer even when attention output is zero,
+            # which keeps embedding statistics similar to the full model and
+            # artificially narrows the performance gap.
+            layer.norm4 = torch.nn.Identity()
+    elif variant in {"full", "unbalanced_sampler", "uniform_loss", "no_augmentation"}:
         pass
     else:
         raise ValueError(f"Unknown variant: {variant}")
@@ -85,18 +130,21 @@ def loss_weights_for_variant(variant):
     return dict(config.LOSS_WEIGHTS)
 
 
-def train_tiny_variant(model, train_datasets, criterion, device, args, variant):
+def train_tiny_variant(model, train_datasets, criterion, device, args, variant, rank=0, world_size=1):
     """Train one tiny ablation variant for a capped number of batches."""
 
     use_balanced_batches = variant != "unbalanced_sampler"
+    # unbalanced_sampler must also skip upsampling; otherwise UpsampledMultiTaskDataset
+    # equalises task counts before batching, making the variant identical to 'full'.
+    use_upsampling = variant != "unbalanced_sampler"
     loader = create_multi_task_dataloader(
         train_datasets,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        use_upsampling=True,
-        rank=0,
-        world_size=1,
+        use_upsampling=use_upsampling,
+        rank=rank,
+        world_size=world_size,
         use_balanced_batches=use_balanced_batches,
     )
 
@@ -140,7 +188,8 @@ def train_tiny_variant(model, train_datasets, criterion, device, args, variant):
 
             total_loss += float(loss.item())
             batches += 1
-            print(f"[{variant}] epoch {epoch} batch {batch_idx}/{args.max_train_batches} loss={loss.item():.4f}")
+            if rank == 0:
+                print(f"[{variant}] epoch {epoch} batch {batch_idx}/{args.max_train_batches} loss={loss.item():.4f}")
 
         train_rows.append(
             {
@@ -169,7 +218,8 @@ def write_csv(path: Path, rows):
 
 def main():
     parser = argparse.ArgumentParser(description="Tiny local ablation study runner.")
-    parser.add_argument("--dataset-root", default="datasets", help="Repo-local dataset root. Nested datasets/datasets is auto-detected.")
+    parser.add_argument("--local_rank", type=int, default=0, help="Local rank set by torchrun (do not set manually).")
+    parser.add_argument("--dataset-root", default=config.DATASET_ROOT, help=f"Path to dataset root. Defaults to {config.DATASET_ROOT}.")
     parser.add_argument("--checkpoint", default=None, help="Optional starting checkpoint. Omit to start from ImageNet/random task heads.")
     parser.add_argument("--allow-partial-checkpoint", action="store_true", help="Load only shape-compatible checkpoint tensors.")
     parser.add_argument("--tasks", nargs="+", default=DEFAULT_TRAIN_TASKS, help="Training tasks for tiny ablation.")
@@ -186,89 +236,136 @@ def main():
     parser.add_argument("--output-dir", default="results/ablation_tiny")
     args = parser.parse_args()
 
+    # Setup distributed training (same pattern as train.py)
+    rank, world_size, local_rank = setup_distributed()
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+
     set_seed(args.seed)
     dataset_root = resolve_dataset_root(args.dataset_root)
     output_dir = Path(args.output_dir)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Dataset root: {dataset_root}")
-    print(f"Device: {device}")
-    print(f"Training tasks: {', '.join(args.tasks)}")
-    print(f"Variants: {', '.join(args.variants)}")
+    if rank == 0:
+        print(f"Dataset root: {dataset_root}")
+        print(f"Device: {device}")
+        print(f"World size: {world_size}")
+        print(f"Training tasks: {', '.join(args.tasks)}")
+        print(f"Variants: {', '.join(args.variants)}")
 
     train_datasets, train_missing = build_train_datasets(dataset_root, args.tasks, args.max_samples, args.seed)
     eval_datasets, eval_missing = build_eval_datasets(dataset_root, args.tasks, args.eval_samples, args.seed)
 
-    for label, missing in [("train", train_missing), ("eval", eval_missing)]:
-        if missing:
-            print(f"\n{label} datasets skipped or unavailable:")
-            for item in missing:
-                print(f"  - {item}")
+    if rank == 0:
+        for label, missing in [("train", train_missing), ("eval", eval_missing)]:
+            if missing:
+                print(f"\n{label} datasets skipped or unavailable:")
+                for item in missing:
+                    print(f"  - {item}")
 
     if not train_datasets:
+        cleanup_distributed()
         raise RuntimeError("No training datasets could be loaded. Check --dataset-root and --tasks.")
     if not eval_datasets:
+        cleanup_distributed()
         raise RuntimeError("No evaluation datasets could be loaded. Check --dataset-root and --tasks.")
 
     all_train_rows = []
     all_eval_rows = []
 
     for variant_idx, variant in enumerate(args.variants):
-        print(f"\n{'=' * 80}\nRunning variant: {variant}\n{'=' * 80}")
+        if rank == 0:
+            print(f"\n{'=' * 80}\nRunning variant: {variant}\n{'=' * 80}")
         set_seed(args.seed + variant_idx)
 
-        model = FaceXFormer().to(device)
+        # Set dataset augmentation state based on variant
+        for task_datasets in train_datasets.values():
+            for ds in task_datasets:
+                # Use 'no_aug' to bypass is_train=(self.split == 'train') in datasets.py
+                target_split = 'no_aug' if variant == "no_augmentation" else 'train'
+                if hasattr(ds, 'base_dataset'):
+                    ds.base_dataset.split = target_split
+                else:
+                    ds.split = target_split
+
+        # Build a fresh model per variant; apply_variant must run before DDP wrapping.
+        raw_model = FaceXFormer().to(device)
         loaded = load_checkpoint_if_available(
-            model,
+            raw_model,
             args.checkpoint,
             device,
             strict=not args.allow_partial_checkpoint,
         )
-        apply_variant(model, variant)
+        apply_variant(raw_model, variant)
+
+        if world_size > 1:
+            model = DDP(
+                raw_model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                find_unused_parameters=True,
+            )
+        else:
+            model = raw_model
 
         criterion = MultiTaskLoss(loss_weights_for_variant(variant)).to(device)
-        train_rows = train_tiny_variant(model, train_datasets, criterion, device, args, variant)
-        eval_rows = evaluate_current_8task(model, eval_datasets, criterion, device, args.batch_size, args.num_workers)
+        train_rows = train_tiny_variant(
+            model, train_datasets, criterion, device, args, variant,
+            rank=rank, world_size=world_size,
+        )
 
-        for row in eval_rows:
-            row["variant"] = variant
-            row["checkpoint_loaded"] = loaded
+        # Evaluation runs on rank 0 only (tiny subset; no need to distribute).
+        # raw_model shares weights with the DDP wrapper so it reflects trained state.
+        if world_size > 1:
+            dist.barrier()
 
-        all_train_rows.extend(train_rows)
-        all_eval_rows.extend(eval_rows)
+        eval_rows = []
+        if rank == 0:
+            eval_rows = evaluate_current_8task(raw_model, eval_datasets, criterion, device, args.batch_size, args.num_workers)
+            for row in eval_rows:
+                row["variant"] = variant
+                row["checkpoint_loaded"] = loaded
 
-        variant_dir = output_dir / variant
-        write_json(variant_dir / "train_summary.json", train_rows)
-        write_json(variant_dir / "eval_summary.json", eval_rows)
+            all_train_rows.extend(train_rows)
+            all_eval_rows.extend(eval_rows)
 
-        if args.checkpoint is None:
-            # Save tiny-run weights so we can inspect/resume the smoke run if needed.
-            torch.save(
-                {
-                    "variant": variant,
-                    "model_state_dict": model.state_dict(),
-                    "train_rows": train_rows,
-                },
-                variant_dir / "tiny_checkpoint_last.pth",
-            )
+            variant_dir = output_dir / variant
+            write_json(variant_dir / "train_summary.json", train_rows)
+            write_json(variant_dir / "eval_summary.json", eval_rows)
 
-    write_csv(output_dir / "ablation_train_summary.csv", all_train_rows)
-    write_csv(output_dir / "ablation_eval_summary.csv", all_eval_rows)
-    write_json(
-        output_dir / "ablation_summary.json",
-        {
-            "dataset_root": str(dataset_root),
-            "tasks": args.tasks,
-            "variants": args.variants,
-            "train": all_train_rows,
-            "eval": all_eval_rows,
-        },
-    )
+            if args.checkpoint is None:
+                # Save tiny-run weights for inspection/resumption.
+                torch.save(
+                    {
+                        "variant": variant,
+                        "model_state_dict": raw_model.state_dict(),
+                        "train_rows": train_rows,
+                    },
+                    variant_dir / "tiny_checkpoint_last.pth",
+                )
 
-    print(f"\nSaved ablation outputs under: {output_dir}")
-    print("Tiny ablation summary:")
-    for row in all_train_rows:
-        print(f"  {row['variant']:24s} epoch={row['epoch']} train_loss={row['train_loss']:.4f}")
+        del model
+        if world_size > 1:
+            dist.barrier()
+
+    if rank == 0:
+        write_csv(output_dir / "ablation_train_summary.csv", all_train_rows)
+        write_csv(output_dir / "ablation_eval_summary.csv", all_eval_rows)
+        write_json(
+            output_dir / "ablation_summary.json",
+            {
+                "dataset_root": str(dataset_root),
+                "tasks": args.tasks,
+                "variants": args.variants,
+                "train": all_train_rows,
+                "eval": all_eval_rows,
+            },
+        )
+
+        print(f"\nSaved ablation outputs under: {output_dir}")
+        print("Tiny ablation summary:")
+        for row in all_train_rows:
+            print(f"  {row['variant']:24s} epoch={row['epoch']} train_loss={row['train_loss']:.4f}")
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":

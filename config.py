@@ -165,13 +165,16 @@ class Config:
     # GRADIENT_CHECKPOINTING = _auto_config['gradient_checkpointing']
     # _manual_override = False
     
-    NUM_EPOCHS = 12
+    NUM_EPOCHS = 15
     WEIGHT_DECAY = 1e-5
     LR_DECAY_EPOCHS = [6, 10]  # Decay by factor of 10 at epochs 6 and 10
     LR_DECAY_FACTOR = 0.1
     
     # Device
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Dataset root (single place to change for all datasets)
+    DATASET_ROOT = './datasets'
     
     # Checkpoint and logging
     CHECKPOINT_DIR = './checkpoints'

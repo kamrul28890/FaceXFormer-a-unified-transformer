@@ -27,6 +27,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.err
+*.out
 
 # PyTorch
 *.pth
