@@ -8,6 +8,15 @@ Features:
 - Task-specific loss weighting
 - Automatic GPU memory configuration
 - Checkpoint saving and loading
+
+Usage (single GPU):
+    python train.py
+
+Usage (standalone multi-GPU via torchrun):
+    torchrun --nproc_per_node=4 train.py
+
+Usage via SLURM (see submit_job.slurm):
+    sbatch submit_job.slurm
 """
 
 from typing import Dict

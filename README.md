@@ -123,7 +123,7 @@ pip install -r requirements.txt
 ### ✅ Completed Tasks
 
 **Dataset Configuration:**
-- ✅ All dataset paths configured to point to `../facexformer-my/datasets/`
+- ✅ All dataset paths configured to point to `config.DATASET_ROOT` everywhere in the codebase
 - ✅ CelebA cache files cleared for regeneration
 - ✅ Dataset loading progress messages added
 - ✅ Config print spam fixed with worker detection
@@ -131,7 +131,7 @@ pip install -r requirements.txt
 - ✅ 300VW uses correct test sequences (categories 1,2,3)
 
 **Training Infrastructure:**
-- ✅ Multi-GPU DDP training with DistributedDataParallel
+- ✅ Multi-GPU DDP training with DistributedDataParallel (batch job and standalone torchrun modes)
 - ✅ Balanced task distribution in each batch for each GPU
 - ✅ BalancedMultiTaskBatchSampler implemented for exact task balance
 - ✅ UpsampledMultiTaskDataset balances all datasets to 122,450 samples
@@ -140,6 +140,13 @@ pip install -r requirements.txt
 - ✅ All task labels have key existence checks
 - ✅ Gradient flow issues resolved in loss computation
 - ✅ Visibility shape fixed to [29] values instead of [1] average
+
+**Metrics & Evaluation:**
+- ✅ NME calculation properly normalized by inter-ocular distance (IOD)
+- ✅ Age MAE converted from logits to continuous years using bin centers
+- ✅ Headpose MAE correctly handles radians to degrees conversion with `in_radians=True`
+- ✅ Visibility occlusion metric class targets inverted to match paper precision/recall
+- ✅ Unified metric computation applied across all validation and scripts
 
 **Configuration:**
 - ✅ Config auto-configuration based on GPU memory (70GB+: 96 batch, etc.)
@@ -381,8 +388,8 @@ tail -f logs/train.log     # follow the log in real time
 # Single variant, 8 GPUs, foreground (inside tmux/screen)
 torchrun --standalone --nproc_per_node=8 ablation_study.py --variant full
 
-# All four variants back-to-back (each waits for the previous to finish)
-for variant in full standard_cross_attention unbalanced_sampler uniform_loss; do
+# All five variants back-to-back (each waits for the previous to finish)
+for variant in full standard_cross_attention unbalanced_sampler uniform_loss no_augmentation; do
     echo "=== Running variant: $variant ==="
     torchrun --standalone --nproc_per_node=8 ablation_study.py --variant $variant
 done
@@ -790,7 +797,7 @@ Trains and evaluates the same 4 ablation variants as the full study, but on tiny
 ```bash
 # Smoke test all variants (single GPU, 2 batches, 1 epoch)
 python scripts/ablation_study_tiny.py \
-    --variants full standard_cross_attention unbalanced_sampler uniform_loss \
+    --variants full standard_cross_attention unbalanced_sampler uniform_loss no_augmentation \
     --max-samples 8 --max-train-batches 2 --epochs 1
 
 # Larger tiny run on the cluster (submit via submit_ablation.slurm with small settings)
@@ -815,6 +822,7 @@ The ablation study isolates the contribution of three design choices in FaceXFor
 | `standard_cross_attention` | `cross_attn_image_to_token` replaced with `ZeroAttention` (zero output) in every transformer layer | Tests the value of bidirectional cross-attention vs. standard one-directional cross-attention |
 | `unbalanced_sampler` | `use_balanced_batches=False` in the dataloader | Tests the value of the balanced-batch sampler |
 | `uniform_loss` | All task loss weights set to 1.0 instead of `config.LOSS_WEIGHTS` | Tests the value of the paper's tuned per-task loss weighting |
+| `no_augmentation` | Data augmentation disabled (`is_train=False`) | Tests the value of data augmentation in the training pipeline |
 
 All variants use the same datasets, augmentation pipeline, optimizer, and learning rate schedule as the main training run.
 
@@ -823,11 +831,12 @@ All variants use the same datasets, augmentation pipeline, optimizer, and learni
 Runs a single variant on the **complete dataset** with the same distributed training setup as `train.py`. Submit one SLURM job per variant.
 
 ```bash
-# Submit all four variants as separate jobs
+# Submit all five variants as separate jobs
 ABLATION_VARIANT=full                     sbatch submit_ablation.slurm
 ABLATION_VARIANT=standard_cross_attention sbatch submit_ablation.slurm
 ABLATION_VARIANT=unbalanced_sampler       sbatch submit_ablation.slurm
 ABLATION_VARIANT=uniform_loss             sbatch submit_ablation.slurm
+ABLATION_VARIANT=no_augmentation          sbatch submit_ablation.slurm
 ```
 
 The `--variant` argument can also be passed directly when running without SLURM:

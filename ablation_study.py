@@ -12,12 +12,16 @@ Supported variants:
   standard_cross_attention - cross_attn_image_to_token zeroed out (one direction)
   unbalanced_sampler    - balanced-batch sampler disabled
   uniform_loss          - all task loss weights set to 1.0
+  no_augmentation       - data augmentation disabled
 
 Usage (single-GPU local test):
     python ablation_study.py --variant full
 
-Usage via SLURM (see submit_ablation_full.slurm):
-    sbatch submit_ablation_full.slurm
+Usage (standalone multi-GPU via torchrun):
+    torchrun --nproc_per_node=4 ablation_study.py --variant no_augmentation
+
+Usage via SLURM (see submit_ablation.slurm):
+    sbatch submit_ablation.slurm
 """
 
 from __future__ import annotations

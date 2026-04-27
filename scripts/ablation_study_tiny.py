@@ -9,8 +9,11 @@ variants for a few batches to verify:
 - loss-weight options
 - approximate attention ablation plumbing
 
-Recommended first run:
+Recommended first run (single GPU):
     python scripts/ablation_study_tiny.py --variants full standard_cross_attention unbalanced_sampler uniform_loss --max-samples 8 --max-train-batches 2 --epochs 1
+
+Usage (standalone multi-GPU via torchrun):
+    torchrun --nproc_per_node=4 scripts/ablation_study_tiny.py --variants full standard_cross_attention unbalanced_sampler uniform_loss --max-samples 8 --max-train-batches 2 --epochs 1
 
 Later, keep this script structure but increase samples/epochs on a cloud or
 cluster machine.
