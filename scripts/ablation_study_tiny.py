@@ -106,6 +106,13 @@ def apply_variant(model, variant):
     if variant == "standard_cross_attention":
         for layer in model.face_decoder.transformer.layers:
             layer.cross_attn_image_to_token = ZeroAttention()
+            # norm4 is the LayerNorm paired with cross_attn_image_to_token.  In true
+            # standard cross-attention this entire block doesn't exist, so image
+            # embeddings must pass through unchanged.  Leaving norm4 active
+            # normalises the keys every layer even when attention output is zero,
+            # which keeps embedding statistics similar to the full model and
+            # artificially narrows the performance gap.
+            layer.norm4 = torch.nn.Identity()
     elif variant in {"full", "unbalanced_sampler", "uniform_loss"}:
         pass
     else:
@@ -124,12 +131,15 @@ def train_tiny_variant(model, train_datasets, criterion, device, args, variant, 
     """Train one tiny ablation variant for a capped number of batches."""
 
     use_balanced_batches = variant != "unbalanced_sampler"
+    # unbalanced_sampler must also skip upsampling; otherwise UpsampledMultiTaskDataset
+    # equalises task counts before batching, making the variant identical to 'full'.
+    use_upsampling = variant != "unbalanced_sampler"
     loader = create_multi_task_dataloader(
         train_datasets,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        use_upsampling=True,
+        use_upsampling=use_upsampling,
         rank=rank,
         world_size=world_size,
         use_balanced_batches=use_balanced_batches,

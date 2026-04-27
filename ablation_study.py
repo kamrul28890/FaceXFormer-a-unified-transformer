@@ -69,7 +69,7 @@ VALID_VARIANTS = ["full", "standard_cross_attention", "unbalanced_sampler", "uni
 # ---------------------------------------------------------------------------
 
 class ZeroAttention(torch.nn.Module):
-    """Replaces cross_attn_image_to_token with zeros to approximate standard cross-attention."""
+    """Replaces cross_attn_image_to_token with zeros to simulate standard cross-attention."""
 
     def forward(self, q, k, v):
         return torch.zeros_like(q)
@@ -80,6 +80,13 @@ def apply_variant(model: torch.nn.Module, variant: str) -> None:
     if variant == "standard_cross_attention":
         for layer in model.face_decoder.transformer.layers:
             layer.cross_attn_image_to_token = ZeroAttention()
+            # norm4 is the LayerNorm paired with cross_attn_image_to_token.  In true
+            # standard cross-attention this entire block doesn't exist, so image
+            # embeddings must pass through unchanged.  Leaving norm4 active
+            # normalises the keys every layer even when attention output is zero,
+            # which keeps embedding statistics similar to the full model and
+            # artificially narrows the performance gap.
+            layer.norm4 = torch.nn.Identity()
     elif variant in {"full", "unbalanced_sampler", "uniform_loss"}:
         pass
     else:
@@ -214,13 +221,16 @@ def main():
     # Dataloaders — pass use_balanced_batches=False for unbalanced_sampler
     # ------------------------------------------------------------------
     use_balanced = variant != "unbalanced_sampler"
+    # unbalanced_sampler must also skip upsampling; otherwise UpsampledMultiTaskDataset
+    # equalises task counts before batching, making the variant identical to 'full'.
+    use_upsampling = variant != "unbalanced_sampler"
 
     train_loader = create_multi_task_dataloader(
         train_datasets,
         batch_size=config.BATCH_SIZE,
         shuffle=True,
         num_workers=config.NUM_WORKERS,
-        use_upsampling=True,
+        use_upsampling=use_upsampling,
         rank=rank,
         world_size=world_size,
         use_balanced_batches=use_balanced,
