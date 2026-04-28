@@ -157,9 +157,15 @@ def build_eval_datasets(dataset_root: Path, tasks: Iterable[str], max_samples: i
             datasets["segmentation"] = [limit_dataset(ds, max_samples, seed)]
 
     if "landmark" in selected:
-        ds = _try_make(lambda: W300Dataset("test", dataset_root=root), "landmark", missing)
-        if ds is not None:
-            datasets["landmark"] = [limit_dataset(ds, max_samples, seed)]
+        full = _try_make(lambda: W300Dataset("test_full", dataset_root=root), "landmark/300W-full", missing)
+        common = _try_make(lambda: W300Dataset("test_common", dataset_root=root), "landmark/300W-common", missing)
+        challenging = _try_make(lambda: W300Dataset("test_challenging", dataset_root=root), "landmark/300W-challenging", missing)
+        landmark_sets = [ds for ds in [full, common, challenging] if ds is not None]
+        if landmark_sets:
+            datasets["landmark"] = [
+                limit_dataset(ds, max_samples, seed + offset)
+                for offset, ds in enumerate(landmark_sets)
+            ]
 
     if "headpose" in selected:
         ds = _try_make(lambda: BIWIDataset("test", dataset_root=root), "headpose", missing)

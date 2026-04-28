@@ -295,9 +295,16 @@ def compute_nme(predictions, ground_truth, image_size=224):
     predictions = predictions.cpu().numpy()
     ground_truth = ground_truth.cpu().numpy()
 
+    def to_unit_interval(values):
+        # Current FaceXFormer landmark heads are trained in centered
+        # coordinates. Older utilities used [0, 1], so accept both here.
+        if np.nanmin(values) < 0.0:
+            values = (values + 1.0) / 2.0
+        return values
+
     # Reshape to [B, 68, 2] — scale to pixel space for meaningful distances
-    pred_pts = predictions.reshape(-1, 68, 2) * image_size
-    gt_pts = ground_truth.reshape(-1, 68, 2) * image_size
+    pred_pts = to_unit_interval(predictions).reshape(-1, 68, 2) * image_size
+    gt_pts = to_unit_interval(ground_truth).reshape(-1, 68, 2) * image_size
 
     # Per-landmark Euclidean distance: [B, 68]
     distances = np.sqrt(np.sum((pred_pts - gt_pts) ** 2, axis=2))
@@ -642,7 +649,7 @@ def validate_per_dataset(
                     
                     elif task_name == 'headpose':
                         if 'headpose' in targets:
-                            # Labels are [pitch, yaw, roll] in radians (300W-LP convention)
+                            # Labels are [yaw, pitch, roll] in radians.
                             metric = compute_mae(headpose_out, targets['headpose'], in_radians=True)
                             dataset_metric += metric
                     

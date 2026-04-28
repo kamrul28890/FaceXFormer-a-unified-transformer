@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -135,6 +137,9 @@ def paper_target_for_dataset(task_name, dataset_name):
     if not paper_dataset:
         return {}
 
+    if task_name == "landmark" and any(part in dataset_name.lower() for part in ["common", "challenging"]):
+        return {}
+
     dataset_aliases = {
         "CelebAMask-HQ": ["CelebAMaskHQ", "CelebAMask-HQ"],
         "300W": ["W300Dataset", "300W"],
@@ -172,6 +177,7 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                 samples = 0
                 metric_predictions = []
                 metric_targets = []
+                segmentation_confusion = None
                 started = time.time()
 
                 for images, targets in loader:
@@ -191,7 +197,19 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                     outputs = model(images, targets, task_ids)
                     predictions = predictions_from_outputs(outputs)
                     loss, _ = criterion(predictions, targets, task_ids, compute_individual=True)
-                    if task_name == "visibility":
+                    if task_name == "segmentation":
+                        pred_classes = torch.argmax(predictions["seg_output"], dim=1).detach().cpu()
+                        gt_classes = targets["segmentation"].detach().cpu()
+                        num_classes = config.SEGMENTATION_CLASSES
+                        flat = gt_classes.reshape(-1) * num_classes + pred_classes.reshape(-1)
+                        counts = torch.bincount(flat, minlength=num_classes * num_classes)
+                        batch_confusion = counts.reshape(num_classes, num_classes).numpy()
+                        if segmentation_confusion is None:
+                            segmentation_confusion = batch_confusion
+                        else:
+                            segmentation_confusion += batch_confusion
+                        metric = None
+                    elif task_name == "visibility":
                         metric_predictions.append(predictions["visibility_output"].detach().cpu())
                         metric_targets.append(targets["visibility"].detach().cpu())
                         metric = None
@@ -205,7 +223,19 @@ def evaluate_current_8task(model, datasets_by_task, criterion, device, batch_siz
                     samples += int(images.shape[0])
 
                 avg_loss = total_loss / max(batches, 1)
-                if task_name == "visibility" and metric_predictions:
+                if task_name == "segmentation" and segmentation_confusion is not None:
+                    tp = np.diag(segmentation_confusion).astype(np.float64)
+                    fp = segmentation_confusion.sum(axis=0) - tp
+                    fn = segmentation_confusion.sum(axis=1) - tp
+                    denom = (2.0 * tp) + fp + fn
+                    f1_per_class = np.divide(
+                        2.0 * tp,
+                        denom,
+                        out=np.zeros_like(tp, dtype=np.float64),
+                        where=denom > 0,
+                    )
+                    avg_metric = float(f1_per_class.mean())
+                elif task_name == "visibility" and metric_predictions:
                     avg_metric = metric_for_task(
                         task_name,
                         {"visibility_output": torch.cat(metric_predictions, dim=0)},

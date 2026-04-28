@@ -282,7 +282,11 @@ def augment_landmark_detection(pil_image, landmarks_68, target_size, is_train=Tr
         if random.random() < 0.2:
             pil_img = _gamma_adjust_pil(pil_img, random.uniform(0.7, 1.3))
 
+    # The released checkpoint's landmark head uses centered normalized
+    # coordinates. Keep labels in the same space for loss/training, and map
+    # back to [0, 1] inside the NME metric.
     lm_norm = np.clip(lm / target_size, 0.0, 1.0)
+    lm_norm = (lm_norm * 2.0) - 1.0
     return _pil_to_tensor(pil_img), torch.from_numpy(lm_norm.flatten()).float()
 
 
@@ -874,18 +878,32 @@ class CelebAMaskHQDataset(TaskDataset):
         image = Image.open(img_path).convert('RGB')
         img_idx = int(img_path.stem)
         
-        # Load and combine mask from individual files
+        # Load and combine mask from individual part files.
+        #
+        # FaceXFormer uses 11 segmentation tokens: background plus 10 face
+        # parsing classes. Do not clamp the original 18 CelebAMask-HQ parts
+        # into 11 labels; that incorrectly merges unrelated classes. Instead,
+        # keep the subset of classes used by the paper and leave unsupported
+        # parts as background.
         mask_folder = self.data_root / 'CelebAMask-HQ-mask-anno' / str(img_idx // 2000)
         mask = np.zeros((512, 512), dtype=np.int64)
-        mask_names = ['skin', 'l_brow', 'r_brow', 'l_eye', 'r_eye', 'eye_g', 'l_ear', 'r_ear',
-                     'ear_r', 'nose', 'mouth', 'u_lip', 'l_lip', 'neck', 'neck_l', 'cloth', 'hair', 'hat']
-        for i, label_name in enumerate(mask_names, start=1):
+        segmentation_label_map = {
+            'skin': 1,
+            'r_brow': 2,
+            'l_brow': 3,
+            'r_eye': 4,
+            'l_eye': 5,
+            'nose': 6,
+            'u_lip': 7,
+            'mouth': 8,
+            'l_lip': 9,
+            'hair': 10,
+        }
+        for label_name, class_idx in segmentation_label_map.items():
             mask_file = mask_folder / f'{img_idx:05d}_{label_name}.png'
             if mask_file.exists():
                 label_mask = np.array(Image.open(mask_file).convert('L'))
-                # Limit to SEGMENTATION_CLASSES (0 to SEGMENTATION_CLASSES-1)
-                max_class = (config.SEGMENTATION_CLASSES - 1) if config else 10
-                mask[label_mask == 255] = min(i, max_class)
+                mask[label_mask == 255] = class_idx
         
         # Resize image and mask to IMG_SIZE
         image = simple_augmentation(image, self.target_size)
@@ -900,20 +918,71 @@ class CelebAMaskHQDataset(TaskDataset):
 
 
 class W300Dataset(TaskDataset):
-    """300W for landmarks. Maps to task 1."""
+    """300W for landmarks. Maps to task 1.
+
+    Prefer the standard 300W protocol used by most landmark papers:
+    train = AFW + LFPW train + HELEN train (3148 images)
+    test = LFPW test + HELEN test + IBUG (689 images)
+
+    Some older copies only include the 600-image 300W challenge folder
+    (01_Indoor/02_Outdoor), so we keep that layout as a fallback.
+    """
     def __init__(self, split='train', dataset_root=None):
         super().__init__('300W', 'landmark', split, dataset_root)
         self.data_root = self.dataset_root / '300w'
-        base_path = self.data_root / '300W' if (self.data_root / '300W').exists() else self.data_root
-        self.data = []
-        for subdir in ['01_Indoor', '02_Outdoor']:
-            subdir_path = base_path / subdir
-            if subdir_path.exists():
-                self.data.extend(list(subdir_path.glob('*.jpg')) + list(subdir_path.glob('*.png')))
-        total = len(self.data)
-        self.data = self.data[:int(total * 0.82)] if split == 'train' else self.data[int(total * 0.82):]
+
+        def collect_images(paths):
+            images = []
+            for path in paths:
+                if path.exists():
+                    candidates = list(path.glob('*.jpg')) + list(path.glob('*.png'))
+                    images.extend([img for img in candidates if img.with_suffix('.pts').exists()])
+            return sorted(images)
+
+        train_dirs = [
+            self.data_root / 'afw',
+            self.data_root / 'lfpw' / 'trainset',
+            self.data_root / 'helen' / 'trainset',
+        ]
+        common_dirs = [
+            self.data_root / 'lfpw' / 'testset',
+            self.data_root / 'helen' / 'testset',
+        ]
+        challenging_dirs = [self.data_root / 'ibug']
+        test_dirs = common_dirs + challenging_dirs
+        has_standard_protocol = all(path.exists() for path in train_dirs + test_dirs)
+
+        if has_standard_protocol:
+            split_dirs = {
+                'train': train_dirs,
+                'test': test_dirs,
+                'test_full': test_dirs,
+                'test_common': common_dirs,
+                'test_challenging': challenging_dirs,
+            }
+            if split not in split_dirs:
+                raise ValueError(f"Unsupported 300W split for standard layout: {split}")
+            self.data = collect_images(split_dirs[split])
+        else:
+            base_path = self.data_root / '300W' if (self.data_root / '300W').exists() else self.data_root
+            challenge_dirs = [base_path / '01_Indoor', base_path / '02_Outdoor']
+            all_images = collect_images(challenge_dirs)
+            total = len(all_images)
+            split_at = int(total * 0.82)
+            self.data = all_images[:split_at] if split == 'train' else all_images[split_at:]
+
         if len(self.data) == 0:
             raise FileNotFoundError(f"300W not found at {self.data_root}")
+
+    def get_name(self):
+        split_names = {
+            'test': 'full',
+            'test_full': 'full',
+            'test_common': 'common',
+            'test_challenging': 'challenging',
+        }
+        subset_name = split_names.get(self.split, self.split)
+        return f"{self.__class__.__name__}-{subset_name}"
     
     def _load_pts(self, pts_path):
         with open(pts_path, 'r') as f:
@@ -955,7 +1024,10 @@ class W300LPDataset(TaskDataset):
         mat_path = img_path.with_suffix('.mat')
         import scipy.io
         pose_data = scipy.io.loadmat(str(mat_path))
-        rotation = pose_data['Pose_Para'][0][:3]  # Euler angles
+        # 300W-LP stores Pose_Para as [pitch, yaw, roll]. The model/loss use
+        # [yaw, pitch, roll] internally.
+        pitch, yaw, roll = pose_data['Pose_Para'][0][:3]
+        rotation = np.array([yaw, pitch, roll], dtype=np.float32)
 
         image = augment_headpose(image, self.target_size, is_train=(self.split == 'train'))
         rotation = torch.from_numpy(rotation).float()
@@ -1162,6 +1234,32 @@ class FairFaceDataset(TaskDataset):
         }
         race_map = {'White': 0, 'Black': 1, 'Asian': 2, 'Indian': 3, 'Others': 4}
         gender_map = {'Male': 0, 'Female': 1}
+        numeric_fairface_age_map = {
+            0: 0,  # 0-2
+            1: 0,  # 3-9
+            2: 1,  # 10-19
+            3: 2,  # 20-29
+            4: 3,  # 30-39
+            5: 4,  # 40-49
+            6: 5,  # 50-59
+            7: 6,  # 60-69
+            8: 7,  # more than 70
+        }
+        # Local extracted FairFace labels use numeric 7-race IDs documented in
+        # datasets/datasets/FairFace/README.md:
+        # 0 East Asian, 1 Indian, 2 Black, 3 White,
+        # 4 Middle Eastern, 5 Latino/Hispanic, 6 Southeast Asian.
+        # The current model has the 5-class UTK-style head:
+        # White, Black, Asian, Indian, Others.
+        numeric_fairface_race_map = {
+            0: 2,
+            1: 3,
+            2: 1,
+            3: 0,
+            4: 4,
+            5: 4,
+            6: 2,
+        }
         
         self.data = []
         self.labels = []
@@ -1172,11 +1270,26 @@ class FairFaceDataset(TaskDataset):
                 img_filename = Path(row['file']).name if 'file' in df.columns else row.iloc[0]
                 img_path = self.data_root / 'extracted' / csv_split / img_filename
                 if img_path.exists():
+                    age_value = row['age']
+                    gender_value = row['gender']
+                    race_value = row['race']
+                    if pd.notna(age_value) and isinstance(age_value, (int, np.integer, float, np.floating)):
+                        age_label = numeric_fairface_age_map.get(int(age_value), 3)
+                    else:
+                        age_label = age_map.get(str(age_value), 3)
+                    if pd.notna(gender_value) and isinstance(gender_value, (int, np.integer, float, np.floating)):
+                        gender_label = int(gender_value)
+                    else:
+                        gender_label = gender_map.get(str(gender_value), 0)
+                    if pd.notna(race_value) and isinstance(race_value, (int, np.integer, float, np.floating)):
+                        race_label = numeric_fairface_race_map.get(int(race_value), 4)
+                    else:
+                        race_label = race_map.get(str(race_value), 4)
                     self.data.append(img_path)
                     self.labels.append({
-                        'age': age_map.get(row['age'], 3),  # Default to bucket 3 (30-39) if unknown
-                        'gender': gender_map.get(row['gender'], 0),
-                        'race': race_map.get(row['race'], 4)
+                        'age': age_label,
+                        'gender': gender_label,
+                        'race': race_label
                     })
         
         if len(self.data) == 0:
@@ -1350,8 +1463,8 @@ class BIWIDataset(TaskDataset):
             pitch = math.atan2(-R[2, 0], sy)
             roll = 0
         
-        # Match 300W-LP training convention: [pitch, yaw, roll] in radians
-        rotation = torch.tensor([pitch, yaw, roll], dtype=torch.float32)
+        # Match the model/loss convention: [yaw, pitch, roll] in radians.
+        rotation = torch.tensor([yaw, pitch, roll], dtype=torch.float32)
 
         image = augment_headpose(image, self.target_size, is_train=False)
         return (image, {'headpose': rotation, 'task_id': torch.tensor(2)})
