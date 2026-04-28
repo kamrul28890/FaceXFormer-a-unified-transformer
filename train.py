@@ -26,16 +26,23 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import numpy as np
 from tqdm import tqdm
 import os
+import sys
 import argparse
 from pathlib import Path
 import warnings
 import json
 from sklearn.metrics import f1_score, accuracy_score, precision_recall_curve
 import numpy as np
+
+from scripts.small_run_common import PAPER_TARGETS
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -204,9 +211,21 @@ def train_one_epoch(
             if (batch_idx + 1) % 10 == 0:
                 print(f"  Batch {batch_idx + 1}/{len(dataloader)}: loss={loss.item():.4f}, time={batch_time:.2f}s")
     
+    num_batches = len(dataloader)
+    if dist.is_available() and dist.is_initialized():
+        loss_tensor = torch.tensor([total_loss, num_batches], dtype=torch.float64, device=device)
+        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        total_loss = loss_tensor[0].item()
+        num_batches = max(int(loss_tensor[1].item()), 1)
+
+        for task_name in config.LOSS_WEIGHTS.keys():
+            task_tensor = torch.tensor(task_losses.get(task_name, 0.0), dtype=torch.float64, device=device)
+            dist.all_reduce(task_tensor, op=dist.ReduceOp.SUM)
+            task_losses[task_name] = task_tensor.item()
+
     # Average losses
-    avg_loss = total_loss / len(dataloader)
-    avg_task_losses = {k: v / len(dataloader) for k, v in task_losses.items()}
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_task_losses = {k: v / max(num_batches, 1) for k, v in task_losses.items()}
     
     return avg_loss, avg_task_losses
 
@@ -468,6 +487,90 @@ def compute_recall_at_precision(predictions, ground_truth, target_precision=0.8)
     return recall_at_prec
 
 
+def normalize_metric_for_report(task_name, raw_metric, paper_target=None):
+    """Convert raw metric helper outputs into paper-table units."""
+    if raw_metric is None:
+        return None, "", None
+
+    if task_name in {"segmentation", "attribute", "gender", "race", "visibility"}:
+        normalized = raw_metric * 100.0
+        unit = "percent"
+    elif task_name == "landmark":
+        normalized = raw_metric
+        unit = "nme_percent"
+    elif task_name == "headpose":
+        normalized = raw_metric
+        unit = "degrees"
+    elif task_name == "age":
+        normalized = raw_metric
+        unit = "years"
+    else:
+        normalized = raw_metric
+        unit = "raw"
+
+    gap = None if paper_target is None else normalized - paper_target
+    return normalized, unit, gap
+
+
+def paper_target_for_dataset(task_name, dataset_name):
+    """Return the paper target only for rows that match the paper protocol."""
+    target_info = PAPER_TARGETS.get(task_name, {})
+    paper_dataset = target_info.get("dataset")
+    if not paper_dataset:
+        return {}
+
+    if task_name == "landmark" and any(part in dataset_name.lower() for part in ["common", "challenging"]):
+        return {}
+
+    dataset_aliases = {
+        "CelebAMask-HQ": ["CelebAMaskHQ", "CelebAMask-HQ"],
+        "300W": ["W300Dataset", "300W"],
+        "BIWI": ["BIWIDataset", "BIWI"],
+        "CelebA": ["CelebADataset", "CelebA"],
+        "UTKFace": ["UTKFaceDataset", "UTKFace"],
+        "COFW": ["COFWDataset", "COFW"],
+    }
+    aliases = dataset_aliases.get(paper_dataset, [paper_dataset])
+    if any(alias in dataset_name for alias in aliases):
+        return target_info
+    return {}
+
+
+def metric_for_task(task_name, predictions, targets):
+    """Compute the same raw metric used by the current 8-task baseline."""
+    if task_name == 'segmentation':
+        return compute_f1_score(predictions['seg_output'], targets['segmentation'], num_classes=config.SEGMENTATION_CLASSES)
+    if task_name == 'landmark':
+        return compute_nme(predictions['landmark_output'], targets['landmark'])
+    if task_name == 'headpose':
+        return compute_mae(predictions['headpose_output'], targets['headpose'], in_radians=True)
+    if task_name == 'attribute':
+        return compute_accuracy(predictions['attribute_output'], targets['attribute'])
+    if task_name == 'age':
+        return compute_mae(predictions['age_output'], targets['age'].float())
+    if task_name == 'gender':
+        return compute_accuracy(predictions['gender_output'], targets['gender'])
+    if task_name == 'race':
+        return compute_accuracy(predictions['race_output'], targets['race'])
+    if task_name == 'visibility':
+        return compute_recall_at_precision(predictions['visibility_output'], targets['visibility'])
+    raise KeyError(f"Unsupported task: {task_name}")
+
+
+def segmentation_f1_from_confusion(confusion):
+    tp = np.diag(confusion).astype(np.float64)
+    fp = confusion.sum(axis=0) - tp
+    fn = confusion.sum(axis=1) - tp
+    denom = (2.0 * tp) + fp + fn
+    f1_per_class = np.divide(
+        2.0 * tp,
+        denom,
+        out=np.zeros_like(tp, dtype=np.float64),
+        where=denom > 0,
+    )
+    return float(f1_per_class.mean())
+
+
 def validate_per_dataset(
     model: nn.Module,
     test_datasets: Dict[str, list],
@@ -496,6 +599,7 @@ def validate_per_dataset(
             }
     """
     model.eval()
+    eval_model = model.module if isinstance(model, DDP) else model
     results = {}
     
     if rank == 0:
@@ -550,20 +654,16 @@ def validate_per_dataset(
             else:
                 dataset_name = dataset.__class__.__name__
             
-            # Create dataloader for single dataset
+            # Create dataloader for single dataset. For evaluation, use exact
+            # strided rank subsets instead of DistributedSampler so samples are
+            # not padded/duplicated to make replicas even.
             if world_size > 1:
-                from torch.utils.data.distributed import DistributedSampler
-                sampler = DistributedSampler(
-                    dataset,
-                    num_replicas=world_size,
-                    rank=rank,
-                    shuffle=False,
-                    drop_last=False
-                )
+                local_indices = list(range(rank, len(dataset), world_size))
+                local_dataset = Subset(dataset, local_indices)
                 dataloader = torch.utils.data.DataLoader(
-                    dataset,
+                    local_dataset,
                     batch_size=config.BATCH_SIZE,
-                    sampler=sampler,
+                    shuffle=False,
                     num_workers=config.NUM_WORKERS,
                     pin_memory=True
                 )
@@ -579,6 +679,10 @@ def validate_per_dataset(
             dataset_loss = 0.0
             dataset_metric = 0.0
             num_batches = 0
+            dataset_samples = 0
+            metric_predictions = []
+            metric_targets = []
+            segmentation_confusion = None
             first_batch_checked = False  # Flag for debug output
             
             with torch.no_grad():
@@ -605,7 +709,7 @@ def validate_per_dataset(
                     
                     # Forward pass
                     landmark_out, headpose_out, attribute_out, visibility_out, \
-                    age_out, gender_out, race_out, seg_out = model(images, targets, task_ids)
+                    age_out, gender_out, race_out, seg_out = eval_model(images, targets, task_ids)
                     
                     # Prepare predictions dict
                     predictions = {
@@ -629,58 +733,65 @@ def validate_per_dataset(
                     
                     dataset_loss += loss.item()
                     num_batches += 1
+                    dataset_samples += batch_size
                     
                     # Compute task-specific metric
                     if task_name == 'segmentation':
                         if 'segmentation' in targets:
-                            metric = compute_f1_score(seg_out, targets['segmentation'])
-                            dataset_metric += metric
+                            pred_classes = torch.argmax(seg_out, dim=1).detach().cpu()
+                            gt_classes = targets['segmentation'].detach().cpu()
+                            num_classes = config.SEGMENTATION_CLASSES
+                            flat = gt_classes.reshape(-1) * num_classes + pred_classes.reshape(-1)
+                            counts = torch.bincount(flat, minlength=num_classes * num_classes)
+                            batch_confusion = counts.reshape(num_classes, num_classes).numpy()
+                            if segmentation_confusion is None:
+                                segmentation_confusion = batch_confusion
+                            else:
+                                segmentation_confusion += batch_confusion
                         elif rank == 0 and not first_batch_checked:
                             print(f"      ⚠️ WARNING: 'segmentation' not in targets. Available keys: {list(targets.keys())}")
                             first_batch_checked = True
                     
                     elif task_name == 'landmark':
                         if 'landmark' in targets:
-                            metric = compute_nme(landmark_out, targets['landmark'])
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                         elif rank == 0 and not first_batch_checked:
                             print(f"      ⚠️ WARNING: 'landmark' not in targets. Available keys: {list(targets.keys())}")
                             first_batch_checked = True
                     
                     elif task_name == 'headpose':
                         if 'headpose' in targets:
-                            # Labels are [yaw, pitch, roll] in radians.
-                            metric = compute_mae(headpose_out, targets['headpose'], in_radians=True)
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                     
                     elif task_name == 'attribute':
                         if 'attribute' in targets:
-                            metric = compute_accuracy(attribute_out, targets['attribute'])
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                         elif rank == 0 and not first_batch_checked:
                             print(f"      ⚠️ WARNING: 'attribute' not in targets. Available keys: {list(targets.keys())}")
                             first_batch_checked = True
                     
                     elif task_name == 'age':
                         if 'age' in targets:
-                            # age_out is [B, 8] logits, compute_mae will convert to continuous
-                            metric = compute_mae(age_out, targets['age'].float())
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                     
                     elif task_name == 'gender':
                         if 'gender' in targets:
-                            metric = compute_accuracy(gender_out, targets['gender'])
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                     
                     elif task_name == 'race':
                         if 'race' in targets:
-                            metric = compute_accuracy(race_out, targets['race'])
-                            dataset_metric += metric
+                            metric = metric_for_task(task_name, predictions, targets)
+                            dataset_metric += float(metric) * batch_size
                     
                     elif task_name == 'visibility':
                         if 'visibility' in targets:
-                            metric = compute_recall_at_precision(visibility_out, targets['visibility'])
-                            dataset_metric += metric
+                            metric_predictions.append(visibility_out.detach().cpu())
+                            metric_targets.append(targets['visibility'].detach().cpu())
                     
                     if rank == 0:
                         pbar.set_postfix({'loss': f'{loss.item():.4f}'})
@@ -691,45 +802,106 @@ def validate_per_dataset(
                 dataset_loss_tensor = torch.tensor(dataset_loss, device=device)
                 dataset_metric_tensor = torch.tensor(dataset_metric, device=device)
                 num_batches_tensor = torch.tensor(num_batches, device=device)
+                dataset_samples_tensor = torch.tensor(dataset_samples, device=device)
                 
                 torch.distributed.all_reduce(dataset_loss_tensor, op=torch.distributed.ReduceOp.SUM)
                 torch.distributed.all_reduce(dataset_metric_tensor, op=torch.distributed.ReduceOp.SUM)
                 torch.distributed.all_reduce(num_batches_tensor, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(dataset_samples_tensor, op=torch.distributed.ReduceOp.SUM)
                 
                 dataset_loss = dataset_loss_tensor.item()
                 dataset_metric = dataset_metric_tensor.item()
-                num_batches = num_batches_tensor.item()
+                num_batches = int(num_batches_tensor.item())
+                dataset_samples = int(dataset_samples_tensor.item())
+
+                if task_name == 'segmentation':
+                    if segmentation_confusion is None:
+                        segmentation_confusion = np.zeros(
+                            (config.SEGMENTATION_CLASSES, config.SEGMENTATION_CLASSES),
+                            dtype=np.float64,
+                        )
+                    confusion_tensor = torch.tensor(segmentation_confusion, dtype=torch.float64, device=device)
+                    torch.distributed.all_reduce(confusion_tensor, op=torch.distributed.ReduceOp.SUM)
+                    segmentation_confusion = confusion_tensor.cpu().numpy()
+
+                if task_name == 'visibility':
+                    local_predictions = torch.cat(metric_predictions, dim=0) if metric_predictions else torch.empty(0)
+                    local_targets = torch.cat(metric_targets, dim=0) if metric_targets else torch.empty(0)
+                    gathered_predictions = [None for _ in range(world_size)]
+                    gathered_targets = [None for _ in range(world_size)]
+                    torch.distributed.all_gather_object(gathered_predictions, local_predictions)
+                    torch.distributed.all_gather_object(gathered_targets, local_targets)
+                    metric_predictions = [item for item in gathered_predictions if item is not None and item.numel() > 0]
+                    metric_targets = [item for item in gathered_targets if item is not None and item.numel() > 0]
             
             # Average loss and metric for this dataset
             avg_dataset_loss = dataset_loss / num_batches if num_batches > 0 else 0.0
-            avg_dataset_metric = dataset_metric / num_batches if num_batches > 0 else 0.0
+            if task_name == 'segmentation' and segmentation_confusion is not None:
+                avg_dataset_metric = segmentation_f1_from_confusion(segmentation_confusion)
+            elif task_name == 'visibility' and metric_predictions:
+                avg_dataset_metric = metric_for_task(
+                    task_name,
+                    {'visibility_output': torch.cat(metric_predictions, dim=0)},
+                    {'visibility': torch.cat(metric_targets, dim=0)}
+                )
+            else:
+                avg_dataset_metric = dataset_metric / dataset_samples if dataset_samples > 0 else 0.0
+
+            target_info = paper_target_for_dataset(task_name, dataset_name)
+            paper_target = target_info.get('target')
+            normalized_metric, normalized_unit, normalized_gap = normalize_metric_for_report(
+                task_name,
+                avg_dataset_metric,
+                paper_target
+            )
             
             results[task_name][dataset_name] = {
                 'loss': avg_dataset_loss,
-                'metric': avg_dataset_metric
+                'metric': avg_dataset_metric,
+                'raw_metric': avg_dataset_metric,
+                'normalized_metric': normalized_metric,
+                'normalized_metric_unit': normalized_unit,
+                'normalized_gap_metric_minus_target': normalized_gap,
+                'paper_metric': target_info.get('metric', ''),
+                'paper_target': paper_target,
+                'samples': dataset_samples,
+                'batches': num_batches,
             }
             
             task_total_loss += dataset_loss
-            task_total_metric += dataset_metric
+            task_total_metric += avg_dataset_metric * dataset_samples
             task_total_samples += num_batches
+            metric_samples = results[task_name].setdefault('_metric_samples', 0)
+            results[task_name]['_metric_samples'] = metric_samples + dataset_samples
             
             if rank == 0:
-                print(f"  ├─ {dataset_name:30s}: Loss={avg_dataset_loss:.6f}, {metric_names[task_name]}={avg_dataset_metric:.4f}")
+                display_metric = normalized_metric if normalized_metric is not None else avg_dataset_metric
+                display_unit = f" {normalized_unit}" if normalized_unit else ""
+                print(f"  ├─ {dataset_name:30s}: Loss={avg_dataset_loss:.6f}, {metric_names[task_name]}={display_metric:.4f}{display_unit}")
         
         # Compute overall task loss and metric
         avg_task_loss = task_total_loss / task_total_samples if task_total_samples > 0 else 0.0
-        avg_task_metric = task_total_metric / task_total_samples if task_total_samples > 0 else 0.0
+        metric_samples = results[task_name].pop('_metric_samples', 0)
+        avg_task_metric = task_total_metric / metric_samples if metric_samples > 0 else 0.0
+        normalized_metric, normalized_unit, _ = normalize_metric_for_report(task_name, avg_task_metric, None)
         
         results[task_name]['overall'] = {
             'loss': avg_task_loss,
-            'metric': avg_task_metric
+            'metric': avg_task_metric,
+            'raw_metric': avg_task_metric,
+            'normalized_metric': normalized_metric,
+            'normalized_metric_unit': normalized_unit,
+            'samples': metric_samples,
+            'batches': task_total_samples,
         }
         
         total_loss += task_total_loss
         total_samples += task_total_samples
         
         if rank == 0:
-            print(f"  └─ {'OVERALL':30s}: Loss={avg_task_loss:.6f}, {metric_names[task_name]}={avg_task_metric:.4f}")
+            display_metric = normalized_metric if normalized_metric is not None else avg_task_metric
+            display_unit = f" {normalized_unit}" if normalized_unit else ""
+            print(f"  └─ {'OVERALL':30s}: Loss={avg_task_loss:.6f}, {metric_names[task_name]}={display_metric:.4f}{display_unit}")
     
     # Compute total loss across all tasks
     avg_total_loss = total_loss / total_samples if total_samples > 0 else 0.0
@@ -1076,16 +1248,26 @@ def main():
                 for dataset_name, metrics in task_results.items():
                     if dataset_name == 'overall':
                         continue
+                    value = metrics.get('normalized_metric', metrics['metric'])
+                    unit = metrics.get('normalized_metric_unit', '')
+                    gap = metrics.get('normalized_gap_metric_minus_target')
+                    suffix = f" {unit}" if unit else ""
+                    if gap is not None:
+                        suffix += f" gap={gap:.4f}"
                     
                     if first:
-                        print(f"{task_name:<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                        print(f"{task_name:<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
                         first = False
                     else:
-                        print(f"{'':<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                        print(f"{'':<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
                 
                 # Print overall for this task
                 if 'overall' in task_results:
-                    print(f"{'':<20} {'[OVERALL]':<30} {task_results['overall']['loss']:.6f}      {metric_name:<15} {task_results['overall']['metric']:.4f}")
+                    overall = task_results['overall']
+                    value = overall.get('normalized_metric', overall['metric'])
+                    unit = overall.get('normalized_metric_unit', '')
+                    suffix = f" {unit}" if unit else ""
+                    print(f"{'':<20} {'[OVERALL]':<30} {overall['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
                 print(f"{'─'*100}")
             
             print(f"{'TOTAL (All Tasks)':<20} {'':<30} {test_results['total']:.6f}")

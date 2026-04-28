@@ -11,9 +11,14 @@ For multi-GPU:
 
 import torch
 import argparse
+import sys
 from pathlib import Path
 import json
 import numpy as np
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -30,17 +35,30 @@ from train import (
     setup_distributed, cleanup_distributed, validate_per_dataset,
     config, FaceXFormer, MultiTaskLoss
 )
-from datasets import (
-    CelebAMaskHQDataset, W300Dataset, W300LPDataset, CelebADataset,
-    UTKFaceDataset, FairFaceDataset, COFWDataset, W300VWDataset,
-    BIWIDataset, LFWADataset, MultiLabelDatasetWrapper
-)
+from scripts.small_run_common import build_eval_datasets, load_checkpoint_if_available, resolve_dataset_root
+
+
+DEFAULT_TASKS = [
+    "segmentation",
+    "landmark",
+    "headpose",
+    "attribute",
+    "age",
+    "gender",
+    "race",
+    "visibility",
+]
 
 
 def main():
     """Main evaluation function."""
     parser = argparse.ArgumentParser(description='Evaluate FaceXFormer-main on test set')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint file')
+    parser.add_argument('--dataset-root', default='datasets', help='Repo-local dataset root. Nested datasets/datasets is auto-detected.')
+    parser.add_argument('--tasks', nargs='+', default=DEFAULT_TASKS, choices=DEFAULT_TASKS, help='Tasks to evaluate.')
+    parser.add_argument('--max-samples', type=int, default=0, help='Max samples per dataset. Use 0 for all available samples.')
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--allow-partial-checkpoint', action='store_true', help='Load only shape-compatible checkpoint tensors.')
     parser.add_argument('--local_rank', type=int, default=0, help='Local rank for distributed training')
     args = parser.parse_args()
     
@@ -57,6 +75,7 @@ def main():
         print(f"FaceXFormer-main Test Evaluation")
         print(f"{'='*60}")
         print(f"Checkpoint: {args.checkpoint}")
+        print(f"Tasks: {', '.join(args.tasks)}")
         print(f"Number of GPUs: {world_size}")
         print(f"{'='*60}\n")
     
@@ -68,31 +87,15 @@ def main():
         print("Loading test datasets...")
     
     try:
-        celebamask_test = CelebAMaskHQDataset('test')
-        w300_test = W300Dataset('test')
-        w300vw_test = W300VWDataset('test')
-        biwi_test = BIWIDataset('test')
-        celeba_test = CelebADataset('test', rank=rank, world_size=world_size)
-        lfwa_test = LFWADataset('test')
-        utkface_test = UTKFaceDataset('test')
-        fairface_test = FairFaceDataset('test')
-        cofw_test = COFWDataset('test')
-        
-        test_datasets = {
-            'segmentation': [celebamask_test],
-            'landmark': [w300_test, w300vw_test],
-            'headpose': [biwi_test],
-            'attribute': [celeba_test, lfwa_test],
-            'age': [MultiLabelDatasetWrapper(utkface_test, 'age'),
-                    MultiLabelDatasetWrapper(fairface_test, 'age')],
-            'gender': [MultiLabelDatasetWrapper(utkface_test, 'gender'),
-                       MultiLabelDatasetWrapper(fairface_test, 'gender')],
-            'race': [MultiLabelDatasetWrapper(utkface_test, 'race'),
-                     MultiLabelDatasetWrapper(fairface_test, 'race')],
-            'visibility': [cofw_test]
-        }
+        dataset_root = resolve_dataset_root(Path(args.dataset_root))
+        test_datasets, missing = build_eval_datasets(dataset_root, args.tasks, args.max_samples, args.seed)
+        if missing and rank == 0:
+            print(f"Skipped unavailable datasets: {', '.join(missing)}")
+        if not test_datasets:
+            raise FileNotFoundError(f"No requested evaluation datasets found under {dataset_root}")
         
         if rank == 0:
+            print(f"Dataset root: {dataset_root}")
             print(f"✓ All test datasets loaded successfully\n")
     
     except FileNotFoundError as e:
@@ -112,24 +115,18 @@ def main():
     if rank == 0:
         print(f"Loading checkpoint: {args.checkpoint}")
     
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    loaded = load_checkpoint_if_available(
+        model,
+        args.checkpoint,
+        device,
+        strict=not args.allow_partial_checkpoint,
+    )
     
-    # Handle DDP vs non-DDP checkpoint
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
     
-    # Remove 'module.' prefix if present (from DDP)
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k.replace('module.', '')  # remove 'module.' prefix
-        new_state_dict[name] = v
-    
-    model.load_state_dict(new_state_dict)
     
     if rank == 0:
-        epoch = checkpoint.get('epoch', 'unknown')
-        train_loss = checkpoint.get('train_loss', 'unknown')
-        print(f"✓ Checkpoint loaded (epoch: {epoch}, train_loss: {train_loss})\n")
+        status = "loaded" if loaded else "not loaded"
+        print(f"Checkpoint {status}\n")
     
     # Wrap model with DDP if multi-GPU
     if world_size > 1:
@@ -187,16 +184,26 @@ def main():
             for dataset_name, metrics in task_results.items():
                 if dataset_name == 'overall':
                     continue
+                value = metrics.get('normalized_metric', metrics['metric'])
+                unit = metrics.get('normalized_metric_unit', '')
+                gap = metrics.get('normalized_gap_metric_minus_target')
+                suffix = f" {unit}" if unit else ""
+                if gap is not None:
+                    suffix += f" gap={gap:.4f}"
                 
                 if first:
-                    print(f"{task_name:<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                    print(f"{task_name:<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
                     first = False
                 else:
-                    print(f"{'':<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {metrics['metric']:.4f}")
+                    print(f"{'':<20} {dataset_name:<30} {metrics['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
             
             # Print overall for this task
             if 'overall' in task_results:
-                print(f"{'':<20} {'[OVERALL]':<30} {task_results['overall']['loss']:.6f}      {metric_name:<15} {task_results['overall']['metric']:.4f}")
+                overall = task_results['overall']
+                value = overall.get('normalized_metric', overall['metric'])
+                unit = overall.get('normalized_metric_unit', '')
+                suffix = f" {unit}" if unit else ""
+                print(f"{'':<20} {'[OVERALL]':<30} {overall['loss']:.6f}      {metric_name:<15} {value:.4f}{suffix}")
             print(f"{'─'*100}")
         
         print(f"{'TOTAL (All Tasks)':<20} {'':<30} {test_results['total']:.6f}")

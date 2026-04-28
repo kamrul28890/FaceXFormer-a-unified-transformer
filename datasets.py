@@ -655,11 +655,13 @@ class BalancedMultiTaskBatchSampler:
                                         if task_idx in tasks_with_extra 
                                         else self.base_samples_per_task)
                 
-                # Get samples from the upsampled shuffled pool
+                # Get samples from the upsampled shuffled pool, then encode
+                # them into the global index format expected by
+                # UpsampledMultiTaskDataset.__getitem__.
                 start_pos = global_batch_idx * samples_for_this_task
                 end_pos = start_pos + samples_for_this_task
-                
-                batch.extend(task_indices[start_pos:end_pos])
+                for sample_idx in task_indices[start_pos:end_pos]:
+                    batch.append(sample_idx * self.num_tasks + task_idx)
             
             # Shuffle within batch for additional randomness
             if self.shuffle:
