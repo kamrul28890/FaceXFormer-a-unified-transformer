@@ -1,0 +1,25 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "segmentation",
+      "dataset": "CelebAMaskHQDataset[all:2000]",
+      "samples": 2000,
+      "batches": 125,
+      "loss": 0.29410313737392424,
+      "metric": 0.9176525281109323,
+      "gap_metric_minus_target": null,
+      "raw_metric": 0.9176525281109323,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 91.76525281109323,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": -0.24474718890677138,
+      "paper_metric": "F1",
+      "paper_target": 92.01,
+      "seconds": 64.14222502708435
+    }
+  ]
+}

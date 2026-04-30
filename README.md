@@ -1,8 +1,22 @@
 # FaceXFormer-main Training Setup
 
+## Reproduction Documentation Map
+
+This repository now includes a complete reproduction package for the FaceXFormer eight-task reproduction work.
+
+Start here:
+
+- [Project overview](docs/reproduction/PROJECT_OVERVIEW.md)
+- [Implementation details](docs/reproduction/IMPLEMENTATION_DETAILS.md)
+- [Artifact manifest](docs/reproduction/ARTIFACT_MANIFEST.md)
+- [Final report package](report_final/README.md)
+- Final compiled PDF: `report_final/main.pdf`
+
+Scope note: local environments and raw datasets are intentionally not tracked. Large checkpoint artifacts are tracked with Git LFS. The final report intentionally omits ablation studies because validated ablation experiments were not completed.
+
 Complete training infrastructure for FaceXFormer-main with multi-GPU support and upsampling strategy.
 
-> **Original Paper**: [_FaceXFormer_ : A Unified Transformer for Facial Analysis](https://kartik-3004.github.io/facexformer/) (ICCV 2025)  
+> **Original Paper**: [_FaceXFormer_ : A Unified Transformer for Facial Analysis](https://kartik-3004.github.io/facexformer/) (ICCV 2025)
 > [Project Page](https://kartik-3004.github.io/facexformer/) | [Paper (arXiv)](https://arxiv.org/abs/2403.12960v3) | [Hugging Face Model](https://huggingface.co/kartiknarayan/facexformer)
 
 ## Overview
@@ -537,7 +551,7 @@ Edit [config.py](config.py) to adjust training settings:
 BATCH_SIZE = 96  # Auto-configured based on GPU memory
 
 # Learning rate (scaled based on batch size)
-LEARNING_RATE = 2e-4  
+LEARNING_RATE = 2e-4
 
 # Training epochs
 NUM_EPOCHS = 12
@@ -698,7 +712,7 @@ If datasets are not found, ensure:
    # Windows (PowerShell)
    $env:NCCL_DEBUG="INFO"
    $env:TORCH_DISTRIBUTED_DEBUG="DETAIL"
-   
+
    # Linux
    export NCCL_DEBUG=INFO
    export TORCH_DISTRIBUTED_DEBUG=DETAIL

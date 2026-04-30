@@ -1,0 +1,10 @@
+[
+  {
+    "variant": "full",
+    "epoch": 1,
+    "train_batches": 1,
+    "train_loss": 4.1889238357543945,
+    "seconds": 0.48631763458251953,
+    "balanced_batches": true
+  }
+]

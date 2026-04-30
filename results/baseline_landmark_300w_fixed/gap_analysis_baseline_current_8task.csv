@@ -1,0 +1,2 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+landmark,W300Dataset[subset:8],8,4,0.23004186153411865,151.7271488904953,,151.7271488904953,,151.7271488904953,nme_percent,147.0571488904953,NME,4.67,0.500234842300415

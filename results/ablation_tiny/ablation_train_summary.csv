@@ -1,0 +1,2 @@
+balanced_batches,epoch,seconds,train_batches,train_loss,variant
+True,1,0.48631763458251953,1,4.1889238357543945,full

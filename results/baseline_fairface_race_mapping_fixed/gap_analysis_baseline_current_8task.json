@@ -1,0 +1,42 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "race",
+      "dataset": "UTKFaceDataset (race)[all:3556]",
+      "samples": 3556,
+      "batches": 56,
+      "loss": 0.11424333340885186,
+      "metric": 0.9803149606299213,
+      "gap_metric_minus_target": null,
+      "raw_metric": 0.9803149606299213,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 98.03149606299213,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "seconds": 19.479121923446655
+    },
+    {
+      "task": "race",
+      "dataset": "FairFaceDataset (race)[all:21908]",
+      "samples": 21908,
+      "batches": 343,
+      "loss": 0.99401348716316,
+      "metric": 0.6458827825451889,
+      "gap_metric_minus_target": null,
+      "raw_metric": 0.6458827825451889,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 64.5882782545189,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "seconds": 123.5375759601593
+    }
+  ]
+}

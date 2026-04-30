@@ -1,0 +1,25 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "visibility",
+      "dataset": "COFWDataset[all:507]",
+      "samples": 507,
+      "batches": 254,
+      "loss": 3.4768217184881527,
+      "metric": 0.0,
+      "gap_metric_minus_target": -72.56,
+      "raw_metric": 0.0,
+      "raw_gap_metric_minus_target": -72.56,
+      "normalized_metric": 0.0,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": -72.56,
+      "paper_metric": "Recall@P80",
+      "paper_target": 72.56,
+      "seconds": 7.174626111984253
+    }
+  ]
+}

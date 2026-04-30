@@ -1,0 +1,44 @@
+[
+  {
+    "task": "segmentation",
+    "dataset": "CelebAMaskHQDataset[tiny:4]",
+    "samples": 4,
+    "batches": 4,
+    "loss": 4.1898432970047,
+    "metric": 0.05116563400878909,
+    "paper_metric": "F1",
+    "paper_target": 92.01,
+    "gap_metric_minus_target": -91.95883436599122,
+    "seconds": 0.2573404312133789,
+    "variant": "full",
+    "checkpoint_loaded": false
+  },
+  {
+    "task": "landmark",
+    "dataset": "W300Dataset[tiny:4]",
+    "samples": 4,
+    "batches": 4,
+    "loss": 0.21459577418863773,
+    "metric": 0.20087391678700633,
+    "paper_metric": "NME",
+    "paper_target": 4.67,
+    "gap_metric_minus_target": -4.469126083212994,
+    "seconds": 0.20377206802368164,
+    "variant": "full",
+    "checkpoint_loaded": false
+  },
+  {
+    "task": "headpose",
+    "dataset": "BIWIDataset[tiny:4]",
+    "samples": 4,
+    "batches": 4,
+    "loss": 0.39835527539253235,
+    "metric": 0.20542355626821518,
+    "paper_metric": "MAE",
+    "paper_target": 3.52,
+    "gap_metric_minus_target": -3.314576443731785,
+    "seconds": 0.14251232147216797,
+    "variant": "full",
+    "checkpoint_loaded": false
+  }
+]

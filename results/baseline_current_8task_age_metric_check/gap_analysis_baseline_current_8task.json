@@ -1,0 +1,42 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "age",
+      "dataset": "UTKFaceDataset (age)[subset:128]",
+      "samples": 128,
+      "batches": 64,
+      "loss": 0.37532597185000327,
+      "metric": 1.2573775239288807,
+      "gap_metric_minus_target": -2.9126224760711192,
+      "raw_metric": 1.2573775239288807,
+      "raw_gap_metric_minus_target": -2.9126224760711192,
+      "normalized_metric": 1.2573775239288807,
+      "normalized_metric_unit": "years",
+      "normalized_gap_metric_minus_target": -2.9126224760711192,
+      "paper_metric": "MAE",
+      "paper_target": 4.17,
+      "seconds": 1.9642417430877686
+    },
+    {
+      "task": "age",
+      "dataset": "FairFaceDataset (age)[subset:128]",
+      "samples": 128,
+      "batches": 64,
+      "loss": 2.657674244605005,
+      "metric": 12.297667413949966,
+      "gap_metric_minus_target": 8.127667413949967,
+      "raw_metric": 12.297667413949966,
+      "raw_gap_metric_minus_target": 8.127667413949967,
+      "normalized_metric": 12.297667413949966,
+      "normalized_metric_unit": "years",
+      "normalized_gap_metric_minus_target": 8.127667413949967,
+      "paper_metric": "MAE",
+      "paper_target": 4.17,
+      "seconds": 1.7516779899597168
+    }
+  ]
+}

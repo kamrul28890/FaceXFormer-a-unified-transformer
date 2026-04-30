@@ -1,0 +1,4 @@
+batches,checkpoint_loaded,dataset,gap_metric_minus_target,loss,metric,paper_metric,paper_target,samples,seconds,task,variant
+4,False,CelebAMaskHQDataset[tiny:4],-91.95883436599122,4.1898432970047,0.05116563400878909,F1,92.01,4,0.2573404312133789,segmentation,full
+4,False,W300Dataset[tiny:4],-4.469126083212994,0.21459577418863773,0.20087391678700633,NME,4.67,4,0.20377206802368164,landmark,full
+4,False,BIWIDataset[tiny:4],-3.314576443731785,0.39835527539253235,0.20542355626821518,MAE,3.52,4,0.14251232147216797,headpose,full

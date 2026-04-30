@@ -1,0 +1,2 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+headpose,BIWIDataset[all:15678],15678,245,0.6588721528345225,20.64968527657506,,20.64968527657506,,20.64968527657506,degrees,17.12968527657506,MAE,3.52,201.4298985004425

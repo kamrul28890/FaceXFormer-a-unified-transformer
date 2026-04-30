@@ -1,0 +1,38 @@
+{
+  "gender": {
+    "UTKFaceDataset (gender)[subset:2]": {
+      "loss": 4.172324707951702e-08,
+      "metric": 1.0,
+      "raw_metric": 1.0,
+      "normalized_metric": 100.0,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "samples": 2,
+      "batches": 1
+    },
+    "FairFaceDataset (gender)[subset:2]": {
+      "loss": 8.83198226802051e-05,
+      "metric": 1.0,
+      "raw_metric": 1.0,
+      "normalized_metric": 100.0,
+      "normalized_metric_unit": "percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "samples": 2,
+      "batches": 1
+    },
+    "overall": {
+      "loss": 4.418077296364231e-05,
+      "metric": 1.0,
+      "raw_metric": 1.0,
+      "normalized_metric": 100.0,
+      "normalized_metric_unit": "percent",
+      "samples": 4,
+      "batches": 2
+    }
+  },
+  "total": 4.418077296364231e-05
+}

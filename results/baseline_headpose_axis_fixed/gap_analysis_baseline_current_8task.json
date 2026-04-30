@@ -1,0 +1,25 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "headpose",
+      "dataset": "BIWIDataset[all:15678]",
+      "samples": 15678,
+      "batches": 245,
+      "loss": 0.6588721528345225,
+      "metric": 20.64968527657506,
+      "gap_metric_minus_target": null,
+      "raw_metric": 20.64968527657506,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 20.64968527657506,
+      "normalized_metric_unit": "degrees",
+      "normalized_gap_metric_minus_target": 17.12968527657506,
+      "paper_metric": "MAE",
+      "paper_target": 3.52,
+      "seconds": 201.4298985004425
+    }
+  ]
+}

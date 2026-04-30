@@ -1,0 +1,25 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "landmark",
+      "dataset": "W300Dataset[subset:8]",
+      "samples": 8,
+      "batches": 4,
+      "loss": 0.23004186153411865,
+      "metric": 151.7271488904953,
+      "gap_metric_minus_target": null,
+      "raw_metric": 151.7271488904953,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 151.7271488904953,
+      "normalized_metric_unit": "nme_percent",
+      "normalized_gap_metric_minus_target": 147.0571488904953,
+      "paper_metric": "NME",
+      "paper_target": 4.67,
+      "seconds": 0.500234842300415
+    }
+  ]
+}

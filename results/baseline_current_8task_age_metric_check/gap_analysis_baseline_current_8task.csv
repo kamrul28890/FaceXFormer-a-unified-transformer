@@ -1,0 +1,3 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+age,UTKFaceDataset (age)[subset:128],128,64,0.37532597185000327,1.2573775239288807,-2.9126224760711192,1.2573775239288807,-2.9126224760711192,1.2573775239288807,years,-2.9126224760711192,MAE,4.17,1.9642417430877686
+age,FairFaceDataset (age)[subset:128],128,64,2.657674244605005,12.297667413949966,8.127667413949967,12.297667413949966,8.127667413949967,12.297667413949966,years,8.127667413949967,MAE,4.17,1.7516779899597168

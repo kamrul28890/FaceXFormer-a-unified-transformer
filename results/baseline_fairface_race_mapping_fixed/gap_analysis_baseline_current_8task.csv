@@ -1,0 +1,3 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+race,UTKFaceDataset (race)[all:3556],3556,56,0.11424333340885186,0.9803149606299213,,0.9803149606299213,,98.03149606299213,percent,,,,19.479121923446655
+race,FairFaceDataset (race)[all:21908],21908,343,0.99401348716316,0.6458827825451889,,0.6458827825451889,,64.5882782545189,percent,,,,123.5375759601593

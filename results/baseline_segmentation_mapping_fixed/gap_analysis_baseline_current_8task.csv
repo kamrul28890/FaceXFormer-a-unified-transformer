@@ -1,0 +1,2 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+segmentation,CelebAMaskHQDataset[all:2000],2000,125,10.026733390808106,0.18139513703288612,,0.18139513703288612,,18.139513703288614,percent,-73.87048629671139,F1,92.01,64.81353116035461

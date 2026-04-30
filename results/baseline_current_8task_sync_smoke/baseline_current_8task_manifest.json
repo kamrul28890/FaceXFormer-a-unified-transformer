@@ -1,0 +1,49 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "generated_at": "2026-04-27T17:22:21",
+  "checkpoint_loaded": true,
+  "checkpoint": {
+    "path": "checkpoints\\ckpts\\model.pt",
+    "sha256": "327A755849BA64D336FB96589FF87B27E84A12BE1ECF8BCFAA503D66F803286D",
+    "size_bytes": 1104869851
+  },
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "tasks": [
+    "segmentation",
+    "landmark",
+    "headpose",
+    "attribute",
+    "age",
+    "gender",
+    "race",
+    "visibility"
+  ],
+  "max_samples": 2,
+  "batch_size": 1,
+  "num_workers": 0,
+  "seed": 0,
+  "result_files": [
+    "results\\baseline_current_8task_sync_smoke\\gap_analysis_baseline_current_8task.csv",
+    "results\\baseline_current_8task_sync_smoke\\gap_analysis_baseline_current_8task.json",
+    "results\\baseline_current_8task_sync_smoke\\baseline_current_8task_manifest.json"
+  ],
+  "num_result_rows": 12,
+  "total_samples": 24,
+  "metric_columns": {
+    "metric": "Original raw script metric, retained for backward compatibility.",
+    "raw_metric": "Same value as metric.",
+    "raw_gap_metric_minus_target": "Deprecated mixed-unit gap column; intentionally left blank.",
+    "normalized_metric": "Report-ready metric in normalized_metric_unit.",
+    "normalized_metric_unit": "percent, degrees, nme_percent, years, or raw.",
+    "normalized_gap_metric_minus_target": "normalized_metric minus paper_target when the row dataset matches the paper target dataset."
+  },
+  "normalization_rules": {
+    "segmentation": "raw F1 fraction * 100 -> percent",
+    "attribute_gender_race": "raw accuracy fraction * 100 -> percent",
+    "visibility": "raw recall fraction * 100 -> percent",
+    "headpose": "raw MAE already degrees",
+    "landmark": "raw NME already percent; normalized-coordinate datasets use sqrt(2) as image diagonal",
+    "age": "raw MAE already years; bucket targets are converted to representative age-bin centers"
+  }
+}

@@ -1,0 +1,2 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+visibility,COFWDataset[all:507],507,254,3.4768217184881527,0.0,-72.56,0.0,-72.56,0.0,percent,-72.56,Recall@P80,72.56,7.174626111984253

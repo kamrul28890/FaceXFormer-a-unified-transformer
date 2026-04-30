@@ -1,0 +1,4 @@
+task,dataset,samples,batches,loss,metric,gap_metric_minus_target,raw_metric,raw_gap_metric_minus_target,normalized_metric,normalized_metric_unit,normalized_gap_metric_minus_target,paper_metric,paper_target,seconds
+landmark,W300Dataset-full[all:689],689,345,0.0026295791329492045,6.752822766045354,,6.752822766045354,,6.752822766045354,nme_percent,2.0828227660453544,NME,4.67,15.49249815940857
+landmark,W300Dataset-common[all:554],554,277,0.0017814994646767523,5.59551023242706,,5.59551023242706,,5.59551023242706,nme_percent,,,,12.448037147521973
+landmark,W300Dataset-challenging[all:135],135,68,0.006110618907876094,11.502090571103272,,11.502090571103272,,11.502090571103272,nme_percent,,,,2.416815996170044

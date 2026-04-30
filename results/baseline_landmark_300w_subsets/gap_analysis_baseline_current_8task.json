@@ -1,0 +1,59 @@
+{
+  "baseline_scope": "current_8task",
+  "baseline_scope_note": "Current repo implementation: segmentation, landmark, headpose, attribute, age, gender, race, visibility. Not the full 10-task paper baseline.",
+  "checkpoint_loaded": true,
+  "dataset_root": "D:\\Projects\\facexformer-main\\datasets\\datasets",
+  "rows": [
+    {
+      "task": "landmark",
+      "dataset": "W300Dataset-full[all:689]",
+      "samples": 689,
+      "batches": 345,
+      "loss": 0.0026295791329492045,
+      "metric": 6.752822766045354,
+      "gap_metric_minus_target": null,
+      "raw_metric": 6.752822766045354,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 6.752822766045354,
+      "normalized_metric_unit": "nme_percent",
+      "normalized_gap_metric_minus_target": 2.0828227660453544,
+      "paper_metric": "NME",
+      "paper_target": 4.67,
+      "seconds": 15.49249815940857
+    },
+    {
+      "task": "landmark",
+      "dataset": "W300Dataset-common[all:554]",
+      "samples": 554,
+      "batches": 277,
+      "loss": 0.0017814994646767523,
+      "metric": 5.59551023242706,
+      "gap_metric_minus_target": null,
+      "raw_metric": 5.59551023242706,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 5.59551023242706,
+      "normalized_metric_unit": "nme_percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "seconds": 12.448037147521973
+    },
+    {
+      "task": "landmark",
+      "dataset": "W300Dataset-challenging[all:135]",
+      "samples": 135,
+      "batches": 68,
+      "loss": 0.006110618907876094,
+      "metric": 11.502090571103272,
+      "gap_metric_minus_target": null,
+      "raw_metric": 11.502090571103272,
+      "raw_gap_metric_minus_target": null,
+      "normalized_metric": 11.502090571103272,
+      "normalized_metric_unit": "nme_percent",
+      "normalized_gap_metric_minus_target": null,
+      "paper_metric": "",
+      "paper_target": null,
+      "seconds": 2.416815996170044
+    }
+  ]
+}

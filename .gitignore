@@ -30,16 +30,9 @@ wheels/
 *.err
 *.out
 
-# PyTorch
-*.pth
-*.pt
-*.ckpt
-*.safetensors
-*.onnx
-checkpoints/
+# PyTorch runtime outputs
 logs/
 runs/
-results/
 wandb/
 
 # Datasets (too large for git)
@@ -47,8 +40,7 @@ datasets/
 *.pkl
 *.cache
 
-# Large local reference/download artifacts
-*.pdf
+# Compressed local downloads
 *.zip
 *.tar
 *.tar.gz
