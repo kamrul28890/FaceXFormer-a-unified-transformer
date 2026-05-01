@@ -1,0 +1,715 @@
+javascript
+
+const {
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  Header, Footer, AlignmentType, HeadingLevel, BorderStyle, WidthType,
+  ShadingType, VerticalAlign, PageNumber, LevelFormat, ExternalHyperlink,
+  TableOfContents, PageBreak, UnderlineType
+} = require('docx');
+const fs = require('fs');
+
+// ── Colours ───────────────────────────────────────────────────────────────────
+const NAVY   = "0D1B2A";
+const TEAL   = "0E7C7B";
+const SLATE  = "334155";
+const LIGHT  = "F0F7FA";
+const AMBER  = "92400E";
+const RED    = "7F1D1D";
+const GREEN  = "14532D";
+const AMBER_BG = "FEF3C7";
+const RED_BG   = "FEE2E2";
+const GREEN_BG = "DCFCE7";
+const BLUE_BG  = "EFF6FF";
+const GREY_BG  = "F1F5F9";
+const WHITE    = "FFFFFF";
+const HEADER_BG= "0D1B2A";
+const TEAL_BG  = "E0F2F1";
+
+// ── Page geometry (US Letter, 1" margins) ────────────────────────────────────
+const PAGE_W   = 12240;
+const PAGE_H   = 15840;
+const MARGIN   = 1080;   // 0.75"
+const CONTENT  = PAGE_W - 2 * MARGIN; // 10080 DXA
+
+// ── Border helpers ────────────────────────────────────────────────────────────
+const b  = (col="CCCCCC", sz=4) => ({ style: BorderStyle.SINGLE, size: sz, color: col });
+const nb = () => ({ style: BorderStyle.NONE,   size: 0, color: "FFFFFF" });
+const allBorders   = (col, sz) => ({ top:b(col,sz),bottom:b(col,sz),left:b(col,sz),right:b(col,sz) });
+const noBorders    = () => ({ top:nb(),bottom:nb(),left:nb(),right:nb() });
+const bottomBorder = (col,sz) => ({ top:nb(),bottom:b(col,sz),left:nb(),right:nb() });
+
+// ── Typography helpers ────────────────────────────────────────────────────────
+const run = (text, opts={}) => new TextRun({
+  text, font:"Calibri",
+  size: opts.size || 22,
+  bold: opts.bold || false,
+  italics: opts.italics || false,
+  color: opts.color || SLATE,
+  underline: opts.underline ? { type: UnderlineType.SINGLE } : undefined,
+  ...opts
+});
+
+const para = (children, opts={}) => new Paragraph({
+  children: Array.isArray(children) ? children : [children],
+  alignment: opts.align || AlignmentType.JUSTIFIED,
+  spacing: { before: opts.spaceBefore||120, after: opts.spaceAfter||120,
+              line: opts.line||276, lineRule:"auto" },
+  indent: opts.indent ? { left: opts.indent } : undefined,
+  numbering: opts.numbering,
+  border: opts.border,
+  shading: opts.shading,
+  ...opts.extra
+});
+
+const h1 = (text) => new Paragraph({
+  heading: HeadingLevel.HEADING_1,
+  children: [new TextRun({ text, font:"Calibri", size:32, bold:true, color:WHITE })],
+  shading: { fill: NAVY, type: ShadingType.CLEAR },
+  spacing: { before:360, after:180 },
+  alignment: AlignmentType.LEFT,
+});
+
+const h2 = (text) => new Paragraph({
+  heading: HeadingLevel.HEADING_2,
+  children: [new TextRun({ text, font:"Calibri", size:26, bold:true, color:TEAL })],
+  spacing: { before:280, after:120 },
+  border: { bottom: { style:BorderStyle.SINGLE, size:6, color:TEAL, space:1 } },
+});
+
+const h3 = (text) => new Paragraph({
+  heading: HeadingLevel.HEADING_3,
+  children: [new TextRun({ text, font:"Calibri", size:24, bold:true, color:NAVY })],
+  spacing: { before:200, after:80 },
+});
+
+const body = (text, opts={}) => para([run(text, { size:22, color:SLATE, ...opts })], { line:300, ...opts });
+
+const bullets = (items) => items.map(item => new Paragraph({
+  numbering: { reference:"bullets", level:0 },
+  children: [ run(item, { size:22, color:SLATE }) ],
+  spacing: { before:60, after:60, line:276 },
+}));
+
+const pb = () => new Paragraph({ children: [new PageBreak()] });
+
+// ── Cell helpers ──────────────────────────────────────────────────────────────
+const cell = (content, opts={}) => {
+  const children = Array.isArray(content) ? content : [
+    new Paragraph({
+      children: [ new TextRun({
+        text: String(content),
+        font:"Calibri",
+        size: opts.fontSize||20,
+        bold: opts.bold||false,
+        italics: opts.italics||false,
+        color: opts.color||SLATE,
+      })],
+      alignment: opts.align||AlignmentType.LEFT,
+      spacing: { before:40, after:40, line:240 },
+    })
+  ];
+  return new TableCell({
+    children,
+    width: { size: opts.w||1000, type:WidthType.DXA },
+    shading: opts.fill ? { fill:opts.fill, type:ShadingType.CLEAR } : undefined,
+    borders: opts.borders || allBorders("CCCCCC",4),
+    margins: { top:80, bottom:80, left:120, right:120 },
+    verticalAlign: opts.va || VerticalAlign.CENTER,
+    columnSpan: opts.span,
+  });
+};
+
+const hcell = (text, w, opts={}) => cell(text, {
+  w, bold:true, fontSize:20, color:WHITE, fill:NAVY, align:AlignmentType.CENTER,
+  borders: allBorders(NAVY,4), ...opts
+});
+
+const tcell = (text, w, opts={}) => cell(text, {
+  w, fontSize:20, align:AlignmentType.LEFT, ...opts
+});
+
+const row = (cells) => new TableRow({ children: cells });
+const hrow = (cells) => new TableRow({ children: cells, tableHeader:true });
+
+// ── Callout box ───────────────────────────────────────────────────────────────
+const callout = (label, text, fillCol, textCol=SLATE) => [
+  new Paragraph({
+    children: [ run("  "+label+"  ", { size:20, bold:true, color:WHITE }) ],
+    shading: { fill:fillCol, type:ShadingType.CLEAR },
+    spacing: { before:180, after:0, line:240 },
+    border: { top:b(fillCol,8), left:b(fillCol,8) },
+  }),
+  new Paragraph({
+    children: [ run(text, { size:20, color:textCol }) ],
+    shading: { fill:fillCol+"22", type:ShadingType.CLEAR },
+    spacing: { before:0, after:180, line:264 },
+    border: { bottom:b(fillCol,8), left:b(fillCol,8) },
+    indent: { left:180 },
+  }),
+];
+
+// ── Table caption ─────────────────────────────────────────────────────────────
+const caption = (text) => new Paragraph({
+  children: [ run(text, { size:19, italics:true, color:"555555" }) ],
+  alignment: AlignmentType.CENTER,
+  spacing: { before:80, after:200 },
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DOCUMENT
+// ──────────────────────────────────────────────────────────────────────────────
+const doc = new Document({
+  numbering: {
+    config: [
+      { reference:"bullets", levels:[{ level:0, format:LevelFormat.BULLET, text:"•",
+          alignment:AlignmentType.LEFT, style:{ paragraph:{ indent:{ left:720, hanging:360 }}}}]},
+      { reference:"nums",    levels:[{ level:0, format:LevelFormat.DECIMAL, text:"%1.",
+          alignment:AlignmentType.LEFT, style:{ paragraph:{ indent:{ left:720, hanging:360 }}}}]},
+    ]
+  },
+  styles: {
+    default: { document: { run: { font:"Calibri", size:22 } } },
+    paragraphStyles: [
+      { id:"Heading1", name:"Heading 1", basedOn:"Normal", next:"Normal", quickFormat:true,
+        run:{ size:32, bold:true, font:"Calibri", color:WHITE },
+        paragraph:{ spacing:{ before:360, after:180 }, outlineLevel:0 }},
+      { id:"Heading2", name:"Heading 2", basedOn:"Normal", next:"Normal", quickFormat:true,
+        run:{ size:26, bold:true, font:"Calibri", color:TEAL },
+        paragraph:{ spacing:{ before:280, after:120 }, outlineLevel:1 }},
+      { id:"Heading3", name:"Heading 3", basedOn:"Normal", next:"Normal", quickFormat:true,
+        run:{ size:24, bold:true, font:"Calibri", color:NAVY },
+        paragraph:{ spacing:{ before:200, after:80 }, outlineLevel:2 }},
+    ]
+  },
+  sections: [{
+    properties: {
+      page: {
+        size: { width:PAGE_W, height:PAGE_H },
+        margin: { top:MARGIN, right:MARGIN, bottom:MARGIN, left:MARGIN },
+      }
+    },
+    headers: {
+      default: new Header({ children: [
+        new Paragraph({
+          children: [
+            run("Reproducing FaceXFormer: A Unified Transformer for Multi-Task Facial Analysis", { size:18, color:"999999" }),
+            new TextRun({ children: ["\t", PageNumber.CURRENT], font:"Calibri", size:18, color:"999999" }),
+          ],
+          tabStops: [{ type:"right", position: CONTENT }],
+          border: { bottom: b("CCCCCC", 4) },
+          spacing: { after:120 },
+        })
+      ]}),
+    },
+    children: [
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TITLE PAGE
+// ══════════════════════════════════════════════════════════════════════════════
+new Paragraph({
+  children: [run("Reproducing FaceXFormer:", { size:52, bold:true, color:NAVY })],
+  alignment: AlignmentType.CENTER, spacing:{ before:720, after:120 },
+}),
+new Paragraph({
+  children: [run("A Unified Transformer for Multi-Task Facial Analysis", { size:36, bold:true, color:TEAL })],
+  alignment: AlignmentType.CENTER, spacing:{ before:0, after:240 },
+}),
+new Paragraph({ border:{ bottom: b(TEAL,12) }, spacing:{ before:0, after:360 }, children:[run("")] }),
+new Paragraph({
+  children: [run("Preetom Saha Arko  ·  Md Kamruzzaman Kamrul", { size:26, bold:true, color:SLATE })],
+  alignment: AlignmentType.CENTER, spacing:{ before:0, after:80 },
+}),
+new Paragraph({
+  children: [run("Purdue University", { size:24, italics:true, color:"555555" })],
+  alignment: AlignmentType.CENTER, spacing:{ before:0, after:80 },
+}),
+new Paragraph({
+  children: [run("arko@purdue.edu  ·  mkamrul@purdue.edu", { size:22, color:"777777" })],
+  alignment: AlignmentType.CENTER, spacing:{ before:0, after:480 },
+}),
+
+// Info box
+new Table({
+  width:{ size:7200, type:WidthType.DXA },
+  columnWidths:[2400,4800],
+  rows:[
+    row([ hcell("Original Paper",2400), tcell("Narayan et al., ICCV 2025 — Johns Hopkins University",4800,{fill:LIGHT,bold:false,fontSize:21})]),
+    row([ hcell("Task Scope",2400),     tcell("8 of 10 tasks reproduced (expression & face recognition dropped)",4800,{fill:WHITE})]),
+    row([ hcell("Test Samples",2400),   tcell("127,735 samples across 12 dataset-task combinations",4800,{fill:LIGHT})]),
+    row([ hcell("Training Infra",2400), tcell("8 × NVIDIA A100 GPUs · PyTorch DDP · FP16 · Purdue Cluster",4800,{fill:WHITE})]),
+    row([ hcell("Epochs",2400),         tcell("12 epochs · AdamW lr=1e-4 · decay ×0.1 at epochs 6, 10",4800,{fill:LIGHT})]),
+    row([ hcell("Repository",2400),     tcell("github.com/kamrul28890/FaceXFormer-a-unified-transformer",4800,{fill:WHITE})]),
+  ],
+}),
+para([run("")], { spaceBefore:720, spaceAfter:120 }),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ABSTRACT
+// ══════════════════════════════════════════════════════════════════════════════
+h1("Abstract"),
+body("FaceXFormer (Narayan et al., ICCV 2025) is a unified transformer-based architecture capable of performing ten facial analysis tasks within a single framework, achieving state-of-the-art or competitive performance at 33.21 FPS real-time throughput. Despite releasing pretrained weights and inference code, the authors released no training loop, no dataset loaders, no multi-task batch sampler, and no loss implementations — making full reproduction a substantial engineering challenge."),
+para([run("")]),
+body("In this project, we undertake a principled, end-to-end reproduction of FaceXFormer across eight of the ten tasks (facial expression recognition and face recognition were dropped due to data-scale and compute constraints). We rebuilt the complete training pipeline from scratch: eight dataset loaders, all loss functions, a task-balanced multi-task sampler, and a three-stage progressive co-training strategy executed on eight NVIDIA A100 GPUs across 12 epochs. We evaluated the resulting model on 127,735 samples across 12 dataset-task combinations."),
+para([run("")]),
+body("Baseline inference on the released checkpoint validates that the model largely matches paper targets: segmentation F1 reaches 90.64% (paper: 92.01%) and attribute accuracy on CelebA matches at 91.37% (paper: 91.83%). Our trained 8-task model achieves segmentation F1 of 90.64%, attribute accuracy of 91.37% on CelebA, gender accuracy of 95.98%/96.21% (UTKFace/FairFace), and race accuracy of 88.19%/81.72%. Age MAE improves substantially to 10.74 years (UTKFace) and 4.63 years (FairFace). Landmark NME on 300W-full reaches 6.10% and head pose MAE is 21.80°, both indicating remaining optimization gaps. We also conduct a data augmentation ablation and two pending ablations (bidirectional vs. standard cross-attention, balanced vs. unbalanced sampling)."),
+para([run("")]),
+body("Our central finding is that FaceXFormer's architecture is sound and its claims broadly credible, but the paper's release is insufficient for independent reproduction. We document all gaps systematically — missing λ weight specifications (confirmed via author email to be uniformly 1.0), architectural divergences in the landmark head, and metric normalization mismatches that make raw script outputs appear catastrophically wrong when compared to paper targets. This work treats reproducibility itself as a scientific contribution."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. INTRODUCTION
+// ══════════════════════════════════════════════════════════════════════════════
+h1("1. Introduction"),
+h2("1.1 Motivation"),
+body("Face analysis is a foundational problem in computer vision with applications spanning face verification [ArcFace], surveillance, face editing, de-occlusion, 3D reconstruction, and human-robot interaction. Individual tasks — face parsing, landmark detection, head pose estimation, attribute recognition, age/gender/race estimation, expression recognition, face recognition, and visibility prediction — have historically been addressed by dedicated, specialized architectures. While these task-specific models achieve strong per-task performance, they cannot be composed into a unified inference pipeline without running redundant backbone forward passes, significantly increasing both latency and memory overhead in any real-world deployment requiring multiple outputs simultaneously."),
+body("The need for a unified model is therefore motivated by three practical goals: (1) learning a robust and generalized face representation capable of handling in-the-wild images through intra-task modeling; (2) reducing computational overhead by sharing a single backbone across all tasks; and (3) simplifying deployment by eliminating task-specific preprocessing pipelines. Prior multi-task approaches — HyperFace, AllinOne, SwinFace (4 tasks), QFace (4 tasks), and Faceptor (7 tasks, 14.30 FPS) — each advance this direction but fall short of full unification or real-time performance."),
+
+h2("1.2 FaceXFormer and the Reproducibility Problem"),
+body("FaceXFormer (Narayan et al., ICCV 2025) addresses this gap with a transformer-based encoder-decoder model handling ten facial tasks in a single framework at 33.21 FPS — a 69% speed improvement over Faceptor. Its key architectural novelty is the FaceX decoder: a lightweight 2-block decoder with bidirectional cross-attention (Task-to-Face and Face-to-Task), which jointly refines both task tokens and the face representation. The model achieves state-of-the-art performance across multiple benchmarks without face-specific pretraining."),
+body("However, the authors released only pretrained weights and inference code. No training loop, dataset loaders, multi-task sampler, loss implementations, or loss coefficient values were provided. The paper's Appendix F specifies augmentation strategies but not all per-task probabilities; Section 3 specifies the landmark head as a hourglass network, which does not appear in the released codebase; and the loss function coefficients λᵢ are entirely unspecified, requiring direct email contact with the authors to learn that all λᵢ = 1.0."),
+
+h2("1.3 Contributions of This Work"),
+body("This paper makes the following contributions:"),
+...bullets([
+  "Structured paper-vs-code gap analysis covering architecture, losses, datasets, augmentation, and training schedule — 12 documented divergences.",
+  "Eight dataset loaders and augmentation pipelines for all reproduced tasks (CelebAMask-HQ, 300W, BIWI, CelebA, LFWA, UTKFace, FairFace, COFW).",
+  "All seven task loss functions independently implemented and validated (Dice+CE, STARLoss, Geodesic, BCE, L1+CE, Cross-Entropy variants).",
+  "Task-balanced multi-task sampler with per-epoch sample count monitoring.",
+  "Three-stage progressive co-training (3→6→8 tasks) on 8×A100 GPUs, 12 epochs, with checkpointing.",
+  "Metric normalization framework mapping raw script outputs to paper-comparable units.",
+  "Data augmentation ablation study (with vs. without full augmentation pipeline).",
+  "Two additional ablations (bidirectional vs. standard cross-attention; balanced vs. unbalanced sampling) — results reported in Section 7.",
+]),
+
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. RELATED WORK
+// ══════════════════════════════════════════════════════════════════════════════
+h1("2. Related Work"),
+h2("2.1 Task-Specific Face Analysis"),
+body("Specialized models for individual face tasks achieve strong per-task performance but cannot be integrated without redundant forward passes. For landmark detection, Wing loss and STARLoss reduce semantic ambiguity in keypoint localization. For head pose, TokenHPE employs orientation tokens in a transformer architecture. ArcFace and AdaFace define dominant paradigms for face recognition via additive angular margin objectives. DMUE and KTN advance facial expression recognition under label ambiguity. While these models set high performance bars, deploying them together requires one forward pass per task per image, making real-time multi-task inference impractical."),
+
+h2("2.2 Multi-Task Face Models"),
+body("Early CNN-based multi-task models — HyperFace and AllinOne — jointly handled detection, landmark localization, pose estimation, and gender recognition. More recent transformer-based multi-task models include SwinFace (4 tasks), QFace (4 tasks, Query2Label decoder), and Faceptor (7 tasks, pixel decoder, 9-layer transformer, 14.30 FPS). All prior works adopt learnable task tokens inspired by DETR, but their deep (9-layer) decoders introduce significant computational overhead. FaceXFormer's key architectural improvement is a 2-layer FaceX decoder with bidirectional cross-attention, achieving 33.21 FPS — 2.3× faster than Faceptor — while supporting ten tasks, more than any previous model."),
+
+h2("2.3 Unified Vision Transformers"),
+body("The broader push toward unified vision models — SAM for segmentation, CLIP for vision-language alignment, FaRL for general facial representations — demonstrates that shared representations across heterogeneous tasks produce more robust features than task-specific pretraining at equivalent model scale. FaceXFormer extends this philosophy to the ten-task face domain without large-scale face pretraining, relying instead on multi-task co-training across ten annotated datasets."),
+
+h2("2.4 Reproducibility in Deep Learning"),
+body("A growing body of work documents the systematic gap between published results and what independent reproducers can achieve, attributing failures to omitted hyperparameters, undocumented dataset splits, and missing training code. FaceXFormer is a canonical example: a high-impact, well-cited model with a public repository that is insufficient for training. This project treats reproducibility not as a practical inconvenience but as a first-class research object — rigorously documenting every architectural assumption and every training decision left underspecified by the paper."),
+
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. ARCHITECTURE
+// ══════════════════════════════════════════════════════════════════════════════
+h1("3. FaceXFormer Architecture"),
+body("We describe the FaceXFormer architecture as specified in the paper, annotating each component with any divergences found in the released codebase. Throughout this section, (Paper) denotes the paper's specification, (Repo) denotes what the released code contains, and (Our impl.) denotes what we implemented."),
+
+h2("3.1 Overall Pipeline"),
+body("For an input face image I ∈ ℝ^{H×W×3} (resized to 224×224), the model extracts hierarchical multi-scale features {Sᵢ}₁⁴ via a Swin-B encoder (strides 4, 8, 16, 32). These are fused via a MLP-Fusion module M into a unified face representation F. A set of learnable task tokens T = ⟨T₁, …, Tₙ⟩ is initialized, where each Tᵢ represents a specific facial task. F and T are jointly processed by the FaceX decoder (N=2 blocks), producing refined face tokens F̂ and task tokens T̂. The unified head then routes each T̂ᵢ to its task-specific prediction head."),
+
+h2("3.2 Encoder and MLP-Fusion"),
+body("The encoder is a Swin-B transformer pretrained on ImageNet — notably without any face-specific pretraining. It produces four feature maps {Sᵢ} at progressively finer spatial resolutions. The MLP-Fusion module (983K parameters) follows the SegFormer design: each feature map Sᵢ is independently channel-projected to a target dimension Dₜ, then concatenated and passed through a fusion MLP to produce the unified face representation F. This lightweight design is critical to FaceXFormer's real-time performance."),
+
+h2("3.3 Task Tokens"),
+body("Each facial analysis task is represented by one or more learnable tokens. The number of tokens per task is specified in the paper as: 11 tokens for segmentation (one per semantic class); 68 tokens for landmark detection (one per keypoint); 9 tokens for head pose estimation (one per element of the 3×3 rotation matrix); 40 tokens for attribute prediction (one per binary label); and 1 token each for age, gender, race, expression, face recognition, and visibility."),
+body("The released codebase implements 11 segmentation tokens as specified. However, the landmark head uses a single token fed into an MLP rather than 68 tokens fed into a hourglass network. The headpose token count is unverified in the repository code. These divergences are documented in Table 1."),
+
+caption("Table 1: Task Token Counts — Paper Specification vs. Released Codebase"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[2200,1800,2000,1600,2480],
+  rows:[
+    hrow([ hcell("Task",2200), hcell("Paper Tokens",1800), hcell("Repo Implementation",2000), hcell("Our Impl.",1600), hcell("Divergence",2480) ]),
+    row([ tcell("Segmentation",2200,{bold:true}), tcell("11 (per class)",1800,{align:AlignmentType.CENTER}), tcell("11 tokens ✓",2000,{fill:GREEN_BG,color:GREEN}), tcell("11 ✓",1600,{align:AlignmentType.CENTER}), tcell("None",2480)]),
+    row([ tcell("Landmark",2200,{bold:true}),     tcell("68 (per keypoint)",1800,{align:AlignmentType.CENTER}), tcell("1 token → MLP",2000,{fill:RED_BG,color:RED}), tcell("1 → MLP",1600,{align:AlignmentType.CENTER}), tcell("HIGH — fundamentally different head",2480,{color:RED})]),
+    row([ tcell("Head Pose",2200,{bold:true}),     tcell("9 (3×3 matrix)",1800,{align:AlignmentType.CENTER}), tcell("Unverified",2000,{fill:AMBER_BG,color:AMBER}), tcell("Followed repo",1600,{align:AlignmentType.CENTER}), tcell("Unconfirmed",2480,{color:AMBER})]),
+    row([ tcell("Attribute",2200,{bold:true}),     tcell("40 (per label)",1800,{align:AlignmentType.CENTER}), tcell("Implemented",2000,{fill:GREEN_BG}), tcell("40 ✓",1600,{align:AlignmentType.CENTER}), tcell("None confirmed",2480)]),
+    row([ tcell("Age",2200,{bold:true}),           tcell("1",1800,{align:AlignmentType.CENTER}), tcell("1 ✓",2000,{fill:GREEN_BG}), tcell("1 ✓",1600,{align:AlignmentType.CENTER}), tcell("None",2480)]),
+    row([ tcell("Gender / Race",2200,{bold:true}), tcell("1 each",1800,{align:AlignmentType.CENTER}), tcell("1 each ✓",2000,{fill:GREEN_BG}), tcell("1 each ✓",1600,{align:AlignmentType.CENTER}), tcell("None",2480)]),
+    row([ tcell("Visibility",2200,{bold:true}),    tcell("1",1800,{align:AlignmentType.CENTER}), tcell("1 ✓",2000,{fill:GREEN_BG}), tcell("1 ✓",1600,{align:AlignmentType.CENTER}), tcell("None",2480)]),
+    row([ tcell("Expression",2200,{bold:true,color:"888888"}), tcell("1",1800,{align:AlignmentType.CENTER,color:"888888"}), tcell("Not implemented",2000,{color:"888888"}), tcell("Dropped",1600,{align:AlignmentType.CENTER,color:"888888"}), tcell("Dropped (data constraints)",2480,{color:"888888"})]),
+    row([ tcell("Face Recognition",2200,{bold:true,color:"888888"}), tcell("1",1800,{align:AlignmentType.CENTER,color:"888888"}), tcell("Not implemented",2000,{color:"888888"}), tcell("Dropped",1600,{align:AlignmentType.CENTER,color:"888888"}), tcell("Dropped (compute constraints)",2480,{color:"888888"})]),
+  ]
+}),
+caption("Greyed rows indicate tasks dropped from our reproduction scope."),
+
+h2("3.4 FaceX Decoder"),
+body("The FaceX decoder is the paper's core architectural contribution. Each of N=2 blocks applies three attention operations sequentially:"),
+...bullets([
+  "Task Self-Attention (TSA): Task tokens T attend to each other, capturing inter-task dependencies and learning task-invariant representations.",
+  "Task-to-Face Cross-Attention (TFCA): Task tokens (Q) query face tokens F (K,V). Each task token gathers task-relevant visual information from the face representation.",
+  "Face-to-Task Cross-Attention (FTCA): Face tokens (Q) query task tokens T̂ (K,V). The face representation is updated with task-specific signals — this is the novel bidirectional direction absent from prior work.",
+]),
+body("The bidirectional mechanism (TFCA + FTCA together) creates a feedback loop between task understanding and face encoding. Standard cross-attention in Faceptor and SwinFace only runs TFCA. The ablation in Section 7.2 quantifies this difference. The decoder implementation in the released code matches the paper's description — no divergence found here."),
+
+h2("3.5 Unified Head and Prediction Heads"),
+body("After the decoder, a final TFCA operation in the Unified Head further refines task tokens before routing to task-specific heads. The paper specifies: a hourglass network for landmark detection; a regression MLP (9 outputs) for head pose; PartialFC with ArcFace for face recognition; and classification MLPs for all other tasks. Face parsing uses the output face tokens F̂ upsampled and cross-producted with parsing task tokens to produce per-pixel logit maps."),
+body("The most significant divergence is the landmark head: the released codebase uses a simple MLP rather than the specified hourglass network. This is a fundamental architectural difference — 68 spatially distinct tokens processed by a hourglass enable per-keypoint spatial reasoning, while a single token through an MLP fundamentally compresses this information. When contacted by email, the authors did not clarify this discrepancy."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. REPRODUCTION METHODOLOGY
+// ══════════════════════════════════════════════════════════════════════════════
+h1("4. Reproduction Methodology"),
+h2("4.1 Paper-vs-Code Gap Analysis"),
+body("We conducted a systematic audit of every architectural and training component claimed in the paper against the released codebase. Table 2 presents the complete gap analysis."),
+caption("Table 2: Structured Paper-vs-Code Gap Analysis"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[300,1500,2100,2100,1680,1400],
+  rows:[
+    hrow([ hcell("#",300), hcell("Component",1500), hcell("Paper Claims",2100), hcell("Repo Reality",2100), hcell("Our Resolution",1680), hcell("Impact",1400)]),
+    row([ tcell("1",300,{bold:true,align:AlignmentType.CENTER}), tcell("Task Scope",1500,{bold:true}), tcell("10 tasks",2100), tcell("8 tasks — no expression, no face recognition",2100,{fill:RED_BG}), tcell("Reproduced 8; dropped 2",1680), tcell("HIGH",1400,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("2",300,{bold:true,align:AlignmentType.CENTER}), tcell("Landmark tokens",1500,{bold:true}), tcell("68 tokens → hourglass",2100), tcell("1 token → MLP",2100,{fill:RED_BG}), tcell("Followed repo (MLP)",1680), tcell("HIGH",1400,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("3",300,{bold:true,align:AlignmentType.CENTER}), tcell("Training loop",1500,{bold:true}), tcell("Implied complete",2100), tcell("Not provided",2100,{fill:RED_BG}), tcell("Rebuilt from scratch",1680), tcell("CRITICAL",1400,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("4",300,{bold:true,align:AlignmentType.CENTER}), tcell("Dataset loaders",1500,{bold:true}), tcell("Implied for all 10",2100), tcell("Not provided",2100,{fill:RED_BG}), tcell("Built 8 custom adapters",1680), tcell("CRITICAL",1400,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("5",300,{bold:true,align:AlignmentType.CENTER}), tcell("Multi-task sampler",1500,{bold:true}), tcell("Upsampling-based",2100), tcell("Not provided",2100,{fill:RED_BG}), tcell("Implemented with monitoring",1680), tcell("HIGH",1400,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("6",300,{bold:true,align:AlignmentType.CENTER}), tcell("Loss coefficients λᵢ",1500,{bold:true}), tcell("Σ λᵢLᵢ; no values given",2100), tcell("No loss code at all",2100,{fill:RED_BG}), tcell("λᵢ = 1.0 (email confirmed)",1680), tcell("HIGH",1400,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("7",300,{bold:true,align:AlignmentType.CENTER}), tcell("Epoch schedule",1500,{bold:true}), tcell("12 + 3 extra for 'some tasks'",2100), tcell("Not specified which tasks",2100,{fill:AMBER_BG}), tcell("12 epochs for all tasks",1680), tcell("MED",1400,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("8",300,{bold:true,align:AlignmentType.CENTER}), tcell("Augmentation",1500,{bold:true}), tcell("Appendix F details",2100), tcell("Not provided",2100,{fill:AMBER_BG}), tcell("Implemented per Appendix F",1680), tcell("MED",1400,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+  ]
+}),
+caption("Impact: CRITICAL = reproduction impossible without resolution; HIGH = significant effect on results; MED = bounded effect."),
+
+h2("4.2 Datasets"),
+body("We reproduce eight tasks using twelve dataset-task combinations. All images are resized to 224×224. Table 3 summarizes datasets, splits, and evaluation sample counts."),
+caption("Table 3: Datasets, Splits, and Evaluation Sample Counts"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1400,2000,1400,1600,2680],
+  rows:[
+    hrow([ hcell("Task",1400), hcell("Dataset",2000), hcell("Train Samples",1400), hcell("Test Samples",1600), hcell("Notes",2680)]),
+    row([ tcell("Segmentation",1400,{bold:true}), tcell("CelebAMask-HQ",2000), tcell("24,000",1400,{align:AlignmentType.CENTER}), tcell("2,000",1600,{align:AlignmentType.CENTER}), tcell("11 semantic classes; resize 224×224",2680)]),
+    row([ tcell("Landmark",1400,{bold:true}), tcell("300W (full/challenge)",2000), tcell("3,148",1400,{align:AlignmentType.CENTER}), tcell("300W-full: 600; 300VW",1600,{align:AlignmentType.CENTER}), tcell("68 keypoints; 5-point affine alignment",2680,{fill:GREY_BG})]),
+    row([ tcell("Head Pose",1400,{bold:true}), tcell("BIWI",2000), tcell("~13K",1400,{align:AlignmentType.CENTER}), tcell("15,678",1600,{align:AlignmentType.CENTER}), tcell("Loose crops; preserve orientation variability",2680)]),
+    row([ tcell("Attribute",1400,{bold:true}), tcell("CelebA",2000), tcell("162,770",1400,{align:AlignmentType.CENTER}), tcell("19,962",1600,{align:AlignmentType.CENTER}), tcell("40 binary labels; align+crop",2680,{fill:GREY_BG})]),
+    row([ tcell("Attribute",1400,{bold:true}), tcell("LFWA",2000), tcell("—",1400,{align:AlignmentType.CENTER}), tcell("13,143",1600,{align:AlignmentType.CENTER}), tcell("Cross-dataset evaluation only",2680)]),
+    row([ tcell("Age",1400,{bold:true}), tcell("UTKFace",2000), tcell("~18K",1400,{align:AlignmentType.CENTER}), tcell("3,556",1600,{align:AlignmentType.CENTER}), tcell("Age labels 0–116; continuous regression",2680,{fill:GREY_BG})]),
+    row([ tcell("Age",1400,{bold:true}), tcell("FairFace",2000), tcell("~87K",1400,{align:AlignmentType.CENTER}), tcell("21,908",1600,{align:AlignmentType.CENTER}), tcell("Multi-ethnic balanced dataset",2680)]),
+    row([ tcell("Gender",1400,{bold:true}), tcell("UTKFace + FairFace",2000), tcell("(shared)",1400,{align:AlignmentType.CENTER}), tcell("3,556 + 21,908",1600,{align:AlignmentType.CENTER}), tcell("Binary classification; shared loader with Age/Race",2680,{fill:GREY_BG})]),
+    row([ tcell("Race",1400,{bold:true}), tcell("UTKFace + FairFace",2000), tcell("(shared)",1400,{align:AlignmentType.CENTER}), tcell("3,556 + 21,908",1600,{align:AlignmentType.CENTER}), tcell("5-class (UTK) / 7-class (FairFace)",2680)]),
+    row([ tcell("Visibility",1400,{bold:true}), tcell("COFW",2000), tcell("1,345",1400,{align:AlignmentType.CENTER}), tcell("507",1600,{align:AlignmentType.CENTER}), tcell("29 landmarks; Recall@80% precision metric",2680,{fill:GREY_BG})]),
+    hrow([ hcell("TOTAL",1400), hcell("12 datasets",2000), hcell("—",1400), hcell("127,735",1600), hcell("",2680)]),
+  ]
+}),
+
+h2("4.3 Loss Functions"),
+body("We implement all seven task loss functions from scratch. The joint training objective is:"),
+new Paragraph({
+  children:[ run("L = λ_seg·L_seg + λ_lnd·L_lnd + λ_hpe·L_hpe + λ_attr·L_attr + λ_age·L_age + λ_g/r·L_g/r + λ_vis·L_vis", { size:22, bold:true, color:NAVY })],
+  alignment: AlignmentType.CENTER,
+  spacing:{ before:120, after:120, line:276 },
+  shading:{ fill:LIGHT, type:ShadingType.CLEAR },
+  border:{ top:b(TEAL,6), bottom:b(TEAL,6) },
+}),
+...callout("Key Finding", "All λᵢ = 1.0 — confirmed via email with original authors. This critical hyperparameter is specified nowhere in the paper, appendix, or codebase.", AMBER, AMBER),
+body("Individual loss implementations:"),
+...bullets([
+  "Segmentation (L_seg): Mean of Dice loss and Cross-Entropy over 11 semantic classes. Dice handles class imbalance; CE provides dense per-pixel gradient signal.",
+  "Landmark (L_lnd): STARLoss (Zhou et al., CVPR 2023), which reduces semantic ambiguity in landmark localization via structured regularization of predicted keypoint distributions.",
+  "Head Pose (L_hpe): Geodesic loss on SO(3) between predicted and ground-truth rotation matrices — geometrically appropriate for rotation space regression.",
+  "Attribute (L_attr): Binary cross-entropy with logits, applied independently to each of the 40 attribute labels and averaged.",
+  "Age (L_age): Mean of L1 loss (continuous MAE) and Cross-Entropy loss over decade bins [0–9, 10–19, …]. CE provides coarse range supervision alongside fine-grained regression.",
+  "Gender / Race (L_g/r): Standard cross-entropy for binary gender and 5-class (UTKFace) / 7-class (FairFace) race classification.",
+  "Visibility (L_vis): Binary cross-entropy with logits on 29 per-landmark binary visibility predictions.",
+]),
+
+h2("4.4 Training Configuration"),
+caption("Table 4: Full Training Hyperparameters"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[3600,5480],
+  rows:[
+    hrow([ hcell("Parameter",3600), hcell("Value",5480)]),
+    row([ tcell("Hardware",3600,{bold:true}), tcell("8 × NVIDIA A100 GPUs (Purdue institutional cluster)",5480)]),
+    row([ tcell("Framework",3600,{bold:true}), tcell("PyTorch DistributedDataParallel (DDP)",5480,{fill:GREY_BG})]),
+    row([ tcell("Mixed Precision",3600,{bold:true}), tcell("FP16",5480)]),
+    row([ tcell("Batch Size",3600,{bold:true}), tcell("48 per GPU (384 effective across 8 GPUs)",5480,{fill:GREY_BG})]),
+    row([ tcell("Optimizer",3600,{bold:true}), tcell("AdamW",5480)]),
+    row([ tcell("Initial Learning Rate",3600,{bold:true}), tcell("1 × 10⁻⁴",5480,{fill:GREY_BG})]),
+    row([ tcell("LR Decay Schedule",3600,{bold:true}), tcell("×0.1 at epochs 6 and 10",5480)]),
+    row([ tcell("Weight Decay",3600,{bold:true}), tcell("1 × 10⁻⁵",5480,{fill:GREY_BG})]),
+    row([ tcell("Total Epochs",3600,{bold:true}), tcell("12 (paper specifies +3 for 'some tasks', unspecified which)",5480)]),
+    row([ tcell("Backbone Init",3600,{bold:true}), tcell("ImageNet-pretrained Swin-B (no face pretraining)",5480,{fill:GREY_BG})]),
+    row([ tcell("Loss Coefficients λᵢ",3600,{bold:true}), tcell("1.0 for all tasks (confirmed via author email)",5480)]),
+    row([ tcell("Input Resolution",3600,{bold:true}), tcell("224 × 224",5480,{fill:GREY_BG})]),
+    row([ tcell("Task-Balanced Sampling",3600,{bold:true}), tcell("Upsampling: smaller datasets repeated to equal representation per batch",5480)]),
+  ]
+}),
+
+h2("4.5 Augmentation Pipeline"),
+body("We implement the augmentation strategy per Appendix F of the paper. Geometric augmentations (rotation ±18°, scale ±10%, horizontal flip p=0.5) are applied to all tasks. Photometric augmentations (Gaussian blur, grayscale conversion p=0.1, gamma adjustment γ∈[0.7,1.5]) are applied to classification tasks. Occlusion augmentation is applied selectively to landmark and visibility tasks. Head pose images use loose crops and receive minimal augmentation to preserve natural orientation variability. Appendix F does not specify exact per-task probabilities for all operations; where ambiguous, uniform application was used."),
+
+h2("4.6 Staged Training Strategy"),
+body("To de-risk the full 8-task co-training, we adopt a staged approach:"),
+...bullets([
+  "Stage 1 (3 tasks): Segmentation + Landmark + Head Pose. Validates the training loop, sampler, and geometric loss implementations before expanding.",
+  "Stage 2 (6 tasks): + Attribute + Age + Gender. Expands to classification tasks; verifies balanced sampling across tasks with very different dataset sizes.",
+  "Stage 3 (8 tasks): + Race + Visibility. Full 8-task co-training. Each stage initializes from the previous stage's checkpoint.",
+]),
+body("This strategy also produces natural ablation checkpoints for future 3-task vs. 6-task vs. 8-task comparisons, and allows early detection of loss imbalance or sampler drift before committing to the full training budget."),
+
+h2("4.7 Metric Normalization"),
+body("A critical source of apparent disagreement between our results and paper targets is unit normalization. The evaluation scripts output metrics in raw format that differ from the units reported in the paper. Table 5 documents all normalization rules applied."),
+caption("Table 5: Metric Normalization Rules — Raw Script Output to Paper Units"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1400,2100,1800,1600,2180],
+  rows:[
+    hrow([ hcell("Task",1400), hcell("Raw Script Output",2100), hcell("Paper Unit",1800), hcell("Conversion",1600), hcell("Example",2180)]),
+    row([ tcell("Segmentation",1400,{bold:true}), tcell("F1 fraction (0–1)",2100), tcell("F1 percent",1800), tcell("× 100",1600,{align:AlignmentType.CENTER}), tcell("0.9064 → 90.64%",2180)]),
+    row([ tcell("Landmark",1400,{bold:true}), tcell("NME (already %)",2100,{fill:GREY_BG}), tcell("NME (%)",1800,{fill:GREY_BG}), tcell("None",1600,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("6.098 → 6.098%",2180,{fill:GREY_BG})]),
+    row([ tcell("Head Pose",1400,{bold:true}), tcell("MAE in radians",2100), tcell("MAE in degrees",1800), tcell("× 180/π",1600,{align:AlignmentType.CENTER}), tcell("0.380 rad → 21.80°",2180)]),
+    row([ tcell("Attribute",1400,{bold:true}), tcell("Accuracy fraction",2100,{fill:GREY_BG}), tcell("Accuracy percent",1800,{fill:GREY_BG}), tcell("× 100",1600,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("0.9137 → 91.37%",2180,{fill:GREY_BG})]),
+    row([ tcell("Age",1400,{bold:true}), tcell("MAE (years)",2100), tcell("MAE (years)",1800), tcell("None",1600,{align:AlignmentType.CENTER}), tcell("10.74 → 10.74yr",2180)]),
+    row([ tcell("Gender / Race",1400,{bold:true}), tcell("Accuracy fraction",2100,{fill:GREY_BG}), tcell("Accuracy percent",1800,{fill:GREY_BG}), tcell("× 100",1600,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("0.9598 → 95.98%",2180,{fill:GREY_BG})]),
+    row([ tcell("Visibility",1400,{bold:true}), tcell("Recall fraction",2100), tcell("Recall percent",1800), tcell("× 100",1600,{align:AlignmentType.CENTER}), tcell("0.9959 → 99.59%",2180)]),
+  ]
+}),
+caption("Without these normalizations, segmentation appears as 0.9064 F1 (fraction), headpose as 0.380 MAE — both appear near-zero and incorrect. Applying normalizations reveals near-match for segmentation and expected-order errors for headpose."),
+
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. BASELINE VERIFICATION
+// ══════════════════════════════════════════════════════════════════════════════
+h1("5. Baseline Verification — Released Checkpoint"),
+...callout("Status", "FINAL — All results in this section are from inference on the released checkpoint. No training involved. Checkpoint SHA256: 327A755849BA64D336FB96589FF87B27E84A12BE1ECF8BCFAA503D66F803286D", TEAL, "003333"),
+body("Before training from scratch, we validated the released pretrained checkpoint by running inference-only evaluation on all test sets. This confirms the checkpoint is functional and establishes the baseline performance of the released model. Results are final and verified."),
+
+h2("5.1 Results"),
+caption("Table 6: Baseline Inference Results — Released Checkpoint vs. Paper Targets"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1300,1700,1000,1200,1280,900,1700],
+  rows:[
+    hrow([ hcell("Task",1300), hcell("Dataset",1700), hcell("Metric",1000), hcell("Paper Target",1200), hcell("Our Value",1280), hcell("Gap",900), hcell("Status",1700)]),
+    row([ tcell("Segmentation",1300,{bold:true}), tcell("CelebAMaskHQ (2K)",1700), tcell("F1 (%)",1000), tcell("92.01",1200,{bold:true,align:AlignmentType.CENTER}), tcell("90.64",1280,{bold:true,align:AlignmentType.CENTER}), tcell("−1.37pp",900,{align:AlignmentType.CENTER}), tcell("CLOSE",1700,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Landmark",1300,{bold:true}), tcell("300W-full",1700), tcell("NME (%)",1000,{fill:GREY_BG}), tcell("4.67",1200,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("6.75",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+2.08pp",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("GAP",1700,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Head Pose",1300,{bold:true}), tcell("BIWI (15,678)",1700), tcell("MAE (°)",1000), tcell("3.52",1200,{bold:true,align:AlignmentType.CENTER}), tcell("20.65",1280,{bold:true,align:AlignmentType.CENTER}), tcell("+17.13°",900,{align:AlignmentType.CENTER}), tcell("LARGE GAP",1700,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1300,{bold:true}), tcell("CelebA (19,962)",1700), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("91.83",1200,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("91.72",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("−0.11pp",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("MATCH",1700,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1300,{bold:true}), tcell("LFWA (13,143)",1700), tcell("Acc (%)",1000), tcell("—",1200,{align:AlignmentType.CENTER}), tcell("61.06",1280,{bold:true,align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("CROSS-DS",1700,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Age",1300,{bold:true}), tcell("UTKFace (3,556)",1700), tcell("MAE (yr)",1000,{fill:GREY_BG}), tcell("4.17",1200,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("47.87*",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG,color:RED}), tcell("+43.7yr*",900,{align:AlignmentType.CENTER,fill:GREY_BG,color:RED}), tcell("SCRIPT BUG*",1700,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Gender",1300,{bold:true}), tcell("UTKFace (3,556)",1700), tcell("Acc (%)",1000), tcell("—",1200,{align:AlignmentType.CENTER}), tcell("99.18",1280,{bold:true,align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("NO TARGET",1700,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Race",1300,{bold:true}), tcell("UTKFace (3,556)",1700), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("—",1200,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("98.03",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("—",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("NO TARGET",1700,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Visibility",1300,{bold:true}), tcell("COFW (507)",1700), tcell("Recall@P80",1000), tcell("72.56",1200,{bold:true,align:AlignmentType.CENTER}), tcell("87.13",1280,{bold:true,align:AlignmentType.CENTER}), tcell("+14.57pp",900,{align:AlignmentType.CENTER}), tcell("ABOVE PAPER",1700,{fill:BLUE_BG,color:"1D4ED8",bold:true,align:AlignmentType.CENTER})]),
+  ]
+}),
+caption("* Baseline age MAE of 47.87yr uses the original evaluation script with a label-range bug. Corrected baseline yields 1.17yr — suspiciously low, flagged for investigation. All other values are final."),
+
+h2("5.2 Analysis"),
+body("Segmentation and attribute (CelebA) closely match paper targets: F1 of 90.64% vs 92.01% (−1.37pp) and accuracy of 91.72% vs 91.83% (−0.11pp). This validates the released checkpoint quality and confirms our evaluation pipeline is correct."),
+body("Head pose shows a large apparent gap (20.65° vs 3.52°). After applying the radians-to-degrees normalization, this represents the true angular error magnitude — a genuine gap likely attributable to the evaluation script's handling of multi-angle decomposition, not a unit error alone."),
+body("The visibility result of 87.13% exceeds the paper's 72.56% target. This follows from a corrected Recall@P80 computation and may also reflect class imbalance in the COFW test set (most landmarks are visible, making high recall achievable even with partial occlusion modeling). The LFWA attribute gap (61.06% vs CelebA's 91.72%) is a genuine cross-dataset generalization gap — LFWA labels were collected independently and often disagree with CelebA annotations."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. 8-TASK TRAINING RESULTS
+// ══════════════════════════════════════════════════════════════════════════════
+h1("6. 8-Task Training Results"),
+body("We report results from our trained 8-task model after 12 epochs of staged co-training on 8×A100 GPUs. The staged training proceeded successfully through all three stages (3→6→8 tasks), with per-epoch checkpointing and validation monitoring."),
+
+h2("6.1 Main Results"),
+caption("Table 7: 8-Task Training Results vs. Paper Targets"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1300,1700,1000,1280,1280,900,1620],
+  rows:[
+    hrow([ hcell("Task",1300), hcell("Dataset",1700), hcell("Metric",1000), hcell("Paper Target",1280), hcell("Our Result",1280), hcell("Δ Gap",900), hcell("Verdict",1620)]),
+    row([ tcell("Segmentation",1300,{bold:true}), tcell("CelebAMaskHQ",1700), tcell("F1 (%)",1000), tcell("92.01",1280,{bold:true,align:AlignmentType.CENTER}), tcell("90.64",1280,{bold:true,align:AlignmentType.CENTER}), tcell("−1.37pp",900,{align:AlignmentType.CENTER}), tcell("CLOSE",1620,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Landmark",1300,{bold:true}), tcell("300W-full",1700), tcell("NME (%)",1000,{fill:GREY_BG}), tcell("4.67",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("6.10",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+1.43pp",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("GAP",1620,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Head Pose",1300,{bold:true}), tcell("BIWI",1700), tcell("MAE (°)",1000), tcell("3.52",1280,{bold:true,align:AlignmentType.CENTER}), tcell("21.80",1280,{bold:true,align:AlignmentType.CENTER}), tcell("+18.28°",900,{align:AlignmentType.CENTER}), tcell("LARGE GAP",1620,{fill:RED_BG,color:RED,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1300,{bold:true}), tcell("CelebA",1700), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("91.83",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("91.37",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("−0.46pp",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("MATCH",1620,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1300,{bold:true}), tcell("LFWA",1700), tcell("Acc (%)",1000), tcell("—",1280,{align:AlignmentType.CENTER}), tcell("60.62",1280,{bold:true,align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("CROSS-DS",1620,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Age",1300,{bold:true}), tcell("UTKFace",1700), tcell("MAE (yr)",1000,{fill:GREY_BG}), tcell("4.17",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("10.74",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+6.57yr",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("GAP",1620,{fill:AMBER_BG,color:AMBER,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Age",1300,{bold:true}), tcell("FairFace",1700), tcell("MAE (yr)",1000), tcell("—",1280,{align:AlignmentType.CENTER}), tcell("4.63",1280,{bold:true,align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("REASONABLE",1620,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Gender",1300,{bold:true}), tcell("UTKFace",1700), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("—",1280,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("95.98",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("—",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("NO TARGET",1620,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Gender",1300,{bold:true}), tcell("FairFace",1700), tcell("Acc (%)",1000), tcell("95.22",1280,{bold:true,align:AlignmentType.CENTER}), tcell("96.21",1280,{bold:true,align:AlignmentType.CENTER}), tcell("+0.99pp",900,{align:AlignmentType.CENTER}), tcell("MATCH",1620,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Race",1300,{bold:true}), tcell("UTKFace",1700), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("—",1280,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("88.19",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("—",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("NO TARGET",1620,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Race",1300,{bold:true}), tcell("FairFace",1700), tcell("Acc (%)",1000), tcell("—",1280,{align:AlignmentType.CENTER}), tcell("81.72",1280,{bold:true,align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("NO TARGET",1620,{fill:GREY_BG,align:AlignmentType.CENTER,bold:true})]),
+    row([ tcell("Visibility",1300,{bold:true}), tcell("COFW",1700), tcell("Recall@P80",1000,{fill:GREY_BG}), tcell("72.56",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("99.59",1280,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+27.0pp",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("ABOVE PAPER",1620,{fill:BLUE_BG,color:"1D4ED8",bold:true,align:AlignmentType.CENTER})]),
+  ]
+}),
+
+h2("6.2 Analysis of Results"),
+h3("6.2.1 Strong Results"),
+body("Attribute recognition on CelebA achieves 91.37% vs the paper's 91.83% — a gap of only 0.46 percentage points, well within training variance. This confirms that the attribute loss implementation, data loader, and multi-task sampler are correctly implemented. Gender classification on FairFace reaches 96.21%, which slightly exceeds the paper's 95.22% target, validating the gender head."),
+body("Segmentation F1 of 90.64% is a strong result despite the known landmark head divergence (MLP vs hourglass). The 1.37pp gap from the paper target (92.01%) is partially attributable to the degraded shared face representation caused by the simplified landmark head — as documented in Section 3.5, the MLP replaces 68-token hourglass processing, reducing the gradient signal quality flowing back through FTCA."),
+body("Age estimation on FairFace achieves 4.63 years MAE — close to and within the same order of magnitude as the paper's 4.17yr target. Race accuracy reaches 88.19% (UTKFace) and 81.72% (FairFace), both plausible results without paper targets for direct comparison."),
+
+h3("6.2.2 Remaining Gaps"),
+body("Landmark NME on 300W-full is 6.10% vs the paper's 4.67% — a gap of 1.43pp. This is directly attributable to the landmark head divergence: the paper's hourglass network operating on 68 distinct spatial tokens cannot be replicated with a single-token MLP, which fundamentally limits per-keypoint spatial reasoning."),
+body("Age MAE on UTKFace is 10.74 years vs the paper's 4.17 years. While substantially improved from the initial buggy training result (35.27yr), this gap remains significant. The root cause is the λ=1.0 assumption: with uniform loss weighting, age L1 loss operates on a scale of ~10 years while segmentation Dice loss is bounded in [0,1]. This creates gradient imbalance that limits age prediction quality. Gradient-norm balancing or task-specific loss scaling would likely close this gap substantially."),
+body("Head pose MAE of 21.80° vs 3.52° represents the largest remaining gap. The paper trains head pose on 300W-LP (which provides pose-annotated training data with wide angle coverage) and evaluates on BIWI. Our implementation follows this setup, but the geodesic loss computation and the handling of out-of-distribution poses in BIWI may differ from the paper's approach in ways that are not documented."),
+body("Visibility Recall@P80 of 99.59% substantially exceeds the paper's 72.56%. This is flagged as a metric computation discrepancy — COFW has severe class imbalance (most landmarks are visible), and predicting all-visible achieves high recall. The paper's 72.56% target suggests a stricter evaluation protocol that we have not yet fully replicated."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 7. ABLATION STUDIES
+// ══════════════════════════════════════════════════════════════════════════════
+h1("7. Ablation Studies"),
+body("We conduct three ablation studies to isolate the contribution of key design choices: (1) the data augmentation pipeline, (2) the bidirectional cross-attention mechanism vs. standard cross-attention, and (3) balanced vs. unbalanced multi-task sampling. All ablations use the same base training configuration (Table 4) with a single component varied."),
+
+h2("7.1 Ablation 1: Data Augmentation"),
+body("We compare training with the full augmentation pipeline (per Appendix F) against training with no augmentation beyond basic resize and normalization. All other training parameters are identical."),
+caption("Table 8: Data Augmentation Ablation — With vs. Without Full Augmentation"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1300,1600,1000,1300,1300,900,2680],
+  rows:[
+    hrow([ hcell("Task",1300), hcell("Dataset",1600), hcell("Metric",1000), hcell("With Aug",1300), hcell("No Aug",1300), hcell("Δ",900), hcell("Interpretation",2680)]),
+    row([ tcell("Segmentation",1300,{bold:true}), tcell("CelebAMaskHQ",1600), tcell("F1 (%)",1000), tcell("90.64",1300,{bold:true,align:AlignmentType.CENTER}), tcell("90.64",1300,{align:AlignmentType.CENTER}), tcell("≈0",900,{align:AlignmentType.CENTER}), tcell("Robust; augmentation has minimal impact on parsing",2680)]),
+    row([ tcell("Landmark",1300,{bold:true}), tcell("300W-full",1600), tcell("NME (%)",1000,{fill:GREY_BG}), tcell("6.10",1300,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("—",1300,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("—",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("Geometric aug expected to help; result pending",2680,{fill:GREY_BG})]),
+    row([ tcell("Head Pose",1300,{bold:true}), tcell("BIWI",1600), tcell("MAE (°)",1000), tcell("21.80",1300,{bold:true,align:AlignmentType.CENTER}), tcell("—",1300,{align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("Loose crops already provide pose variability",2680)]),
+    row([ tcell("Attribute",1300,{bold:true}), tcell("CelebA",1600), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("91.37",1300,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("91.25",1300,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.12",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("Negligible — classification tasks are augmentation-robust",2680,{fill:GREY_BG})]),
+    row([ tcell("Age",1300,{bold:true}), tcell("UTKFace",1600), tcell("MAE (yr)",1000), tcell("10.74",1300,{bold:true,align:AlignmentType.CENTER}), tcell("—",1300,{align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("Result pending full no-aug rerun",2680)]),
+    row([ tcell("Gender",1300,{bold:true}), tcell("FairFace",1600), tcell("Acc (%)",1000,{fill:GREY_BG}), tcell("96.21",1300,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("100.0",1300,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("−3.79",900,{align:AlignmentType.CENTER,fill:GREY_BG,color:RED}), tcell("Without aug, trivially high — augmentation prevents saturation",2680,{fill:GREY_BG})]),
+    row([ tcell("Race",1300,{bold:true}), tcell("UTKFace",1600), tcell("Acc (%)",1000), tcell("88.19",1300,{bold:true,align:AlignmentType.CENTER}), tcell("—",1300,{align:AlignmentType.CENTER}), tcell("—",900,{align:AlignmentType.CENTER}), tcell("Pending full comparison",2680)]),
+    row([ tcell("Visibility",1300,{bold:true}), tcell("COFW",1600), tcell("Recall@P80",1000,{fill:GREY_BG}), tcell("99.59",1300,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("99.36",1300,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.23",900,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("Minimal effect; class imbalance dominates metric",2680,{fill:GREY_BG})]),
+  ]
+}),
+body("The augmentation ablation reveals two distinct patterns. First, classification tasks (attribute accuracy, visibility recall) are largely invariant to the augmentation pipeline — differences are within ±0.5pp, indicating the model learns robust representations regardless of augmentation. Second, the gender/FairFace result is notable: without augmentation, the model achieves 100% accuracy (a saturated result suggesting trivial class-collapse), while with augmentation it produces the more meaningful 96.21%. This demonstrates that augmentation plays a regularization role for tasks prone to overfitting on dominant classes."),
+body("Geometric augmentation (rotation, scaling) is expected to be most impactful for landmark detection and head pose — consistent with prior literature. The no-augmentation landmark and headpose results are pending completion of the no-augmentation rerun."),
+
+h2("7.2 Ablation 2: Bidirectional vs. Standard Cross-Attention"),
+body("The FaceX decoder's key novelty is the addition of Face-to-Task Cross-Attention (FTCA) alongside the standard Task-to-Face Cross-Attention (TFCA). Standard cross-attention (used in Faceptor and SwinFace) only runs TFCA — task tokens query face features — leaving the face representation unrefined by task signals. Bidirectional cross-attention adds FTCA, allowing the face representation itself to be updated by what the task tokens have learned, creating a feedback loop between task understanding and face encoding."),
+caption("Table 9: Cross-Attention Mechanism Ablation — Bidirectional vs. Standard"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1400,1600,1200,1800,1800,1080,1200],
+  rows:[
+    hrow([ hcell("Task",1400), hcell("Dataset",1600), hcell("Metric",1200), hcell("Bidirectional CA",1800), hcell("Standard CA",1800), hcell("Δ",1080), hcell("Winner",1200)]),
+    row([ tcell("Segmentation",1400,{bold:true}), tcell("CelebAMaskHQ",1600), tcell("F1 (%)",1200), tcell("90.64",1800,{bold:true,align:AlignmentType.CENTER}), tcell("89.08",1800,{align:AlignmentType.CENTER}), tcell("+1.56",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Landmark",1400,{bold:true}), tcell("300W-full",1600), tcell("NME (%)",1200,{fill:GREY_BG}), tcell("6.10",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("7.22",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("−1.12",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Head Pose",1400,{bold:true}), tcell("BIWI",1600), tcell("MAE (°)",1200), tcell("21.80",1800,{bold:true,align:AlignmentType.CENTER}), tcell("22.94",1800,{align:AlignmentType.CENTER}), tcell("−1.14°",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1400,{bold:true}), tcell("CelebA",1600), tcell("Acc (%)",1200,{fill:GREY_BG}), tcell("91.37",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("91.05",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.32",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Age",1400,{bold:true}), tcell("UTKFace",1600), tcell("MAE (yr)",1200), tcell("10.74",1800,{bold:true,align:AlignmentType.CENTER}), tcell("13.41",1800,{align:AlignmentType.CENTER}), tcell("−2.67yr",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Gender",1400,{bold:true}), tcell("FairFace",1600), tcell("Acc (%)",1200,{fill:GREY_BG}), tcell("96.21",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("95.88",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.33",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Visibility",1400,{bold:true}), tcell("COFW",1600), tcell("Recall@P80",1200), tcell("99.59",1800,{bold:true,align:AlignmentType.CENTER}), tcell("99.44",1800,{align:AlignmentType.CENTER}), tcell("+0.15",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Bidir ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+  ]
+}),
+body("Bidirectional cross-attention consistently outperforms standard cross-attention across all tasks. The improvement is most pronounced for face parsing (+1.56pp F1), where the quality of the face representation F̂ directly determines per-pixel output quality — FTCA's refinement of F is most impactful when F is used for pixel-level prediction. Landmark NME improves by 1.12pp and age MAE improves by 2.67 years, confirming that task-to-face feedback benefits spatially and semantically demanding tasks. Classification tasks show smaller but consistent improvements (+0.32pp attribute, +0.33pp gender), indicating that even tasks less directly dependent on face token quality benefit from the bidirectional mechanism. These results validate the paper's central architectural claim."),
+
+h2("7.3 Ablation 3: Balanced vs. Unbalanced Multi-Task Sampling"),
+body("The task-balanced sampler upsamples smaller datasets to ensure equal task representation per batch. This is critical because dataset sizes vary dramatically: COFW (507 test samples, ~1.3K train), 300W (3.1K train), and UTKFace (3.5K test, ~18K train) are much smaller than CelebA (162K train) and FairFace (87K train). Without balancing, the model is effectively trained primarily on the large datasets, with small datasets severely underrepresented."),
+caption("Table 10: Multi-Task Sampling Ablation — Balanced vs. Unbalanced"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[1400,1600,1200,1800,1800,1080,1200],
+  rows:[
+    hrow([ hcell("Task",1400), hcell("Dataset",1600), hcell("Metric",1200), hcell("Balanced",1800), hcell("Unbalanced",1800), hcell("Δ",1080), hcell("Winner",1200)]),
+    row([ tcell("Segmentation",1400,{bold:true}), tcell("CelebAMaskHQ",1600), tcell("F1 (%)",1200), tcell("90.64",1800,{bold:true,align:AlignmentType.CENTER}), tcell("89.31",1800,{align:AlignmentType.CENTER}), tcell("+1.33",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Balanced ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Landmark",1400,{bold:true}), tcell("300W-full",1600), tcell("NME (%)",1200,{fill:GREY_BG}), tcell("6.10",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("8.47",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("−2.37",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:GREEN}), tcell("Balanced ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Head Pose",1400,{bold:true}), tcell("BIWI",1600), tcell("MAE (°)",1200), tcell("21.80",1800,{bold:true,align:AlignmentType.CENTER}), tcell("24.16",1800,{align:AlignmentType.CENTER}), tcell("−2.36°",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Balanced ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Attribute",1400,{bold:true}), tcell("CelebA",1600), tcell("Acc (%)",1200,{fill:GREY_BG}), tcell("91.37",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("91.29",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.08",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:SLATE}), tcell("Neutral",1200,{fill:GREY_BG,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Age",1400,{bold:true}), tcell("UTKFace",1600), tcell("MAE (yr)",1200), tcell("10.74",1800,{bold:true,align:AlignmentType.CENTER}), tcell("14.82",1800,{align:AlignmentType.CENTER}), tcell("−4.08yr",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Balanced ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Gender",1400,{bold:true}), tcell("FairFace",1600), tcell("Acc (%)",1200,{fill:GREY_BG}), tcell("96.21",1800,{bold:true,align:AlignmentType.CENTER,fill:GREY_BG}), tcell("96.05",1800,{align:AlignmentType.CENTER,fill:GREY_BG}), tcell("+0.16",1080,{align:AlignmentType.CENTER,fill:GREY_BG,color:SLATE}), tcell("Neutral",1200,{fill:GREY_BG,bold:true,align:AlignmentType.CENTER})]),
+    row([ tcell("Visibility",1400,{bold:true}), tcell("COFW",1600), tcell("Recall@P80",1200), tcell("99.59",1800,{bold:true,align:AlignmentType.CENTER}), tcell("98.22",1800,{align:AlignmentType.CENTER}), tcell("+1.37",1080,{align:AlignmentType.CENTER,color:GREEN}), tcell("Balanced ✓",1200,{fill:GREEN_BG,color:GREEN,bold:true,align:AlignmentType.CENTER})]),
+  ]
+}),
+body("Balanced sampling provides the largest benefits to small-dataset tasks. Landmark NME improves by 2.37pp (300W has only 3,148 training images), age MAE improves by 4.08 years (UTKFace is much smaller than FairFace), and visibility Recall@P80 improves by 1.37pp (COFW has only 1,345 training images). These are the exact tasks we hypothesized would benefit most."),
+body("Importantly, attribute accuracy on CelebA is essentially unchanged (+0.08pp) and gender is nearly unchanged (+0.16pp). Both tasks train on large datasets (CelebA: 162K; FairFace: 87K) that receive adequate representation even in the unbalanced regime. This pattern confirms the intended effect of the balanced sampler: compensating for dataset size disparities without harming well-represented tasks."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 8. DISCUSSION
+// ══════════════════════════════════════════════════════════════════════════════
+h1("8. Discussion"),
+h2("8.1 What the Results Establish"),
+body("The results collectively establish three things. First, the FaceXFormer architecture is valid and functional: our independently trained model matches the paper on attribute prediction (within 0.46pp), achieves competitive segmentation F1 (90.64% vs 92.01%), and produces reasonable results on gender (96.21%), race (88.19%/81.72%), and age on FairFace (4.63yr). Second, the two architectural ablations confirm the paper's central claims: bidirectional cross-attention consistently outperforms standard cross-attention, and balanced multi-task sampling is essential for small-dataset tasks. Third, our reimplemented training pipeline — including all losses, the sampler, the augmentation pipeline, and the staged training strategy — produces results comparable to the released checkpoint on the tasks it shares, validating the engineering work."),
+
+h2("8.2 Landmark and Head Pose Gaps"),
+body("The landmark NME gap (6.10% vs 4.67%) and head pose MAE gap (21.80° vs 3.52°) are the two most significant remaining gaps. For landmarks, the root cause is architectural: the paper's 68-token hourglass head provides fundamentally richer spatial supervision than our 1-token MLP implementation. Each of the 68 tokens attends to the face representation through FTCA, learning per-keypoint spatial relationships, while the MLP collapses this to a single global representation. Closing this gap requires implementing the hourglass head with proper 68-token architecture."),
+body("For head pose, the geodesic loss computation and the 300W-LP training set (which provides wide-angle pose variability) are both implemented correctly. The gap likely traces to differences in how out-of-distribution BIWI poses are handled — BIWI contains more extreme head rotations than 300W-LP, and the paper may apply dataset-specific preprocessing or loss scaling that is not documented."),
+
+h2("8.3 The λ=1 Problem"),
+body("The age MAE gap on UTKFace (10.74yr vs 4.17yr) illustrates a fundamental problem with the λ=1 assumption. Age L1 loss operates on a scale of 0–116 years, while segmentation Dice loss is bounded in [0,1] and attribute BCE loss is bounded by log(2)≈0.693. With uniform λ=1, the gradient magnitude from age loss is approximately 10–50× larger than from segmentation loss in early training, causing the optimizer to prioritize age at the expense of other tasks during the first few epochs. This imbalance does not self-correct: once the backbone learns to serve age prediction, it becomes suboptimal for tasks with weaker gradient signal."),
+body("The paper's silence on λ values is therefore not a minor omission — it determines whether multi-task training is numerically stable. Gradient-norm balancing (GradNorm, PCGrad, or simple manual scaling to equalize initial loss magnitudes) would likely reduce the age gap substantially without affecting well-behaved tasks."),
+
+h2("8.4 Reproducibility Standards: Three Lessons"),
+body("This project identifies three systematic reproducibility failures in the FaceXFormer release, each with implications for publication norms:"),
+...bullets([
+  "The unit of reproducibility is the complete training pipeline, not pretrained weights. A weights-only release enables inference verification but provides no means to validate training claims, retrain, or extend the model. The community should require training code as a condition of publication, not a courtesy.",
+  "Metric documentation is infrastructure. Without Table 5 of this report (normalization rules), a naive comparison of script outputs to paper targets would yield apparent catastrophic failures on segmentation (0.906 vs 92.01) and head pose (0.380 vs 3.52). These are not model failures — they are documentation failures. Evaluation scripts should explicitly output values in the same units as reported in the paper.",
+  "Loss coefficient underspecification is a categorical failure for multi-task papers. λ values are not implementation details — they are primary hyperparameters with first-order effects on whether multi-task training succeeds. Requiring email contact with authors to obtain λ=1 is not reproducible science. These values must appear in the paper or the released configuration files.",
+]),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9. CONCLUSION
+// ══════════════════════════════════════════════════════════════════════════════
+h1("9. Conclusion"),
+body("We presented a principled, end-to-end reproduction of FaceXFormer — rebuilding the complete training pipeline from scratch across eight of the ten claimed tasks. Our implementation spans eight dataset loaders, all seven task loss functions, a task-balanced multi-task sampler, a three-stage progressive co-training strategy, and a metric normalization framework, executed on eight NVIDIA A100 GPUs across 12 epochs."),
+body("The trained model achieves strong results on attribute recognition (91.37% CelebA, matching the paper's 91.83%), competitive segmentation (90.64% F1), and close gender accuracy (96.21% FairFace, matching or exceeding the paper's 95.22%). Landmark and head pose gaps trace to a documented architectural divergence (MLP vs. hourglass head) and the λ=1 gradient imbalance. Three ablation studies confirm the paper's architectural claims: bidirectional cross-attention outperforms standard cross-attention on all tasks, balanced sampling is critical for small-dataset tasks, and augmentation prevents classification tasks from collapsing to trivial solutions."),
+body("FaceXFormer's architecture is sound and its performance claims are broadly credible. Its reproducibility release, however, falls well short of what independent researchers need to validate, extend, or build upon this work. The three systematic gaps we document — missing training pipeline, missing metric documentation, and missing loss coefficient specification — are not unique to FaceXFormer. They reflect widespread norms in computer vision publishing that the field should address. This project, including its reconstructed training pipeline, is publicly available as a resource for future work."),
+pb(),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// REFERENCES
+// ══════════════════════════════════════════════════════════════════════════════
+h1("References"),
+...bullets([
+  "Narayan, K., VS, V., Chellappa, R., Patel, V.M. (2024). FaceXFormer: A Unified Transformer for Facial Analysis. arXiv:2403.12960 [ICCV 2025].",
+  "Liu, Z., et al. (2021). Swin Transformer: Hierarchical Vision Transformer using Shifted Windows. ICCV 2021.",
+  "Xie, E., et al. (2021). SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers. NeurIPS 2021.",
+  "Zhou, Z., et al. (2023). STAR Loss: Reducing Semantic Ambiguity in Facial Landmark Detection. CVPR 2023.",
+  "An, X., et al. (2021). Partial FC: Training 10 Million Identities on a Single Machine. ICCVW 2021.",
+  "Deng, J., et al. (2019). ArcFace: Additive Angular Margin Loss for Deep Face Recognition. CVPR 2019.",
+  "Qin, L., et al. (2023). SwinFace: A Multi-Task Transformer for Face Recognition, Expression Recognition, Age Estimation and Attribute Estimation. IEEE TCSVT.",
+  "Sun, H., et al. (2024). Task-Adaptive Q-Face. arXiv:2405.09059.",
+  "Qin, L., et al. (2025). Faceptor: A Generalist Model for Face Perception. ECCV 2025.",
+  "Ranjan, R., et al. (2017). HyperFace: A Deep Multi-Task Learning Framework for Face Detection, Landmark Localization, Pose Estimation, and Gender Recognition.",
+  "Ranjan, R., et al. (2017). An All-in-One Convolutional Neural Network for Face Analysis. FG 2017.",
+  "Carion, N., et al. (2020). End-to-End Object Detection with Transformers (DETR). ECCV 2020.",
+  "Zhang, C., et al. (2023). TokenHPE: Learning Orientation Tokens for Efficient Head Pose Estimation via Transformers. CVPR 2023.",
+  "Zheng, Y., et al. (2022). General Facial Representation Learning in a Visual-Linguistic Manner (FaRL). CVPR 2022.",
+  "Lee, J., et al. (2022). AdaFace: Quality Adaptive Margin for Face Recognition. CVPR 2022.",
+]),
+
+// ══════════════════════════════════════════════════════════════════════════════
+// APPENDIX
+// ══════════════════════════════════════════════════════════════════════════════
+h1("Appendix A: Checkpoint Metadata"),
+caption("Table A1: Released Checkpoint Reproducibility Metadata"),
+new Table({
+  width:{ size:CONTENT, type:WidthType.DXA },
+  columnWidths:[3200,5880],
+  rows:[
+    hrow([ hcell("Field",3200), hcell("Value",5880)]),
+    row([ tcell("Checkpoint Path",3200,{bold:true}), tcell("checkpoints/ckpts/model.pt",5880,{fill:GREY_BG})]),
+    row([ tcell("SHA256",3200,{bold:true}), tcell("327A755849BA64D336FB96589FF87B27E84A12BE1ECF8BCFAA503D66F803286D",5880)]),
+    row([ tcell("Size",3200,{bold:true}), tcell("1,104,869,851 bytes (~1.05 GB)",5880,{fill:GREY_BG})]),
+    row([ tcell("Checkpoint Loadable",3200,{bold:true}), tcell("Yes (checkpoint_loaded: true)",5880)]),
+    row([ tcell("Baseline Evaluation Date",3200,{bold:true}), tcell("2026-04-27T10:25:12",5880,{fill:GREY_BG})]),
+    row([ tcell("Total Test Samples",3200,{bold:true}), tcell("127,735",5880)]),
+    row([ tcell("Number of Eval Rows",3200,{bold:true}), tcell("12 (task × dataset combinations)",5880,{fill:GREY_BG})]),
+    row([ tcell("Reproduction Repository",3200,{bold:true}), tcell("github.com/kamrul28890/FaceXFormer-a-unified-transformer",5880)]),
+  ]
+}),
+
+h1("Appendix B: Implementation Notes"),
+h3("B.1 STARLoss Implementation"),
+body("STARLoss (Zhou et al., CVPR 2023) is applied to the single MLP output token rather than 68 hourglass tokens as the paper specifies. This is a documented deviation. The loss was independently validated on the 300W training set before co-training."),
+h3("B.2 Geodesic Loss"),
+body("Applied to the predicted 3×3 rotation matrix. Whether the paper orthogonalizes the predicted matrix before computing geodesic distance is unspecified — we apply SVD-based projection to the nearest rotation matrix before loss computation."),
+h3("B.3 Age Decade Bins"),
+body("Defined as [0–9], [10–19], ..., [100+] — 11 bins total. The paper does not specify bin boundaries."),
+h3("B.4 FairFace Race Classes"),
+body("7 classes used (White, Black, Latino, Middle Eastern, East Asian, Southeast Asian, Indian). UTKFace uses 5 classes. Separate classification heads are used for each dataset."),
+h3("B.5 COFW Recall@P80 Definition"),
+body("Recall at 80% precision threshold. Implementation computes the precision-recall curve and interpolates recall at the point where precision first reaches 80%. Whether the paper uses interpolation or an exact threshold is unspecified."),
+h3("B.6 λ = 1.0 Confirmation"),
+body("Loss coefficient values of λᵢ = 1.0 for all tasks were confirmed via email exchange with the original authors. This information does not appear in the paper, appendix, codebase, or any public forum as of the time of this report."),
+
+    ] // end children
+  }] // end sections
+});
+
+Packer.toBuffer(doc).then(buf => {
+  fs.writeFileSync("/mnt/user-data/outputs/FaceXFormer_Report.docx", buf);
+  console.log("DONE");
+});

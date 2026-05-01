@@ -48,6 +48,14 @@ datasets/
 *.rar
 *.7z
 
+# LaTeX build byproducts
+*.aux
+*.log
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # IDE
 .vscode/
 .idea/
