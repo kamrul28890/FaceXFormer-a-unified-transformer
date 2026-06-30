@@ -1,0 +1,40 @@
+% ICCV 2025 Paper Template; see https://github.com/cvpr-org/author-kit
+
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% Use the ICCV style without review line numbers. Page numbers are useful for
+% course/project review and can be removed for a camera-ready style export.
+\usepackage[pagenumbers]{iccv}
+
+\input{preamble}
+
+\definecolor{iccvblue}{rgb}{0.21,0.49,0.74}
+\usepackage[pagebackref,breaklinks,colorlinks,allcolors=iccvblue]{hyperref}
+
+\def\paperID{*****}
+\def\confName{ICCV}
+\def\confYear{2025}
+
+\title{Reproducing FaceXFormer: A Compact Study of Multi-Task Facial Analysis Reproducibility}
+
+\author{Preetom Saha Arko \quad Md Kamruzzaman Kamrul\\
+Purdue University\\
+{\tt\small arko@purdue.edu, mkamrul@purdue.edu}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+FaceXFormer proposes a single transformer for ten facial analysis tasks while reporting real-time inference and competitive or state-of-the-art accuracy. However, the public release contains pretrained weights and inference code, but not the training loop, dataset loaders, multi-task sampler, loss implementations, task-specific augmentation policy, or fully specified loss coefficients. This paper presents a compact reproduction study of FaceXFormer in the ICCV format. We reconstruct an eight-task training and evaluation pipeline covering face parsing, landmark detection, head pose estimation, attribute prediction, age estimation, gender classification, race classification, and face visibility prediction. We combine a paper-vs-code audit, released-checkpoint verification, staged 3-to-6-to-8 task co-training, and metric normalization analysis. The released checkpoint is broadly validated for segmentation and CelebA attributes, matching the paper within one percentage point after normalization. The trained eight-task reproduction produces meaningful segmentation and close attribute performance, but landmark, head pose, age, demographic, and visibility rows require careful qualification because of implementation divergences, evaluation bugs, or protocol ambiguity. The central conclusion is that FaceXFormer's architecture is plausible, but a checkpoint-only release is insufficient for independent training reproduction of a modern multi-task vision system.
+\end{abstract}
+
+\input{sec/report}
+
+{
+    \small
+    \bibliographystyle{ieeenat_fullname}
+    \bibliography{main}
+}
+
+\end{document}

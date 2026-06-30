@@ -1,0 +1,331 @@
+\section{Introduction}
+
+Modern face perception systems rarely need a single output. A practical system may require face parsing, landmark localization, head pose estimation, attributes prediction, age estimation, gender classification, race classification, visibility prediction, expression recognition, and identity recognition. Historically, these targets have been solved with specialized models, such as landmark-specific losses, head-pose estimators, and recognition embeddings \citep{wing2018,star2023,tokenhpe2023,arcface2019,partialfc2021}. Such task-specific design is accurate within individual benchmarks, but it creates repeated backbones, multiple pre-processing paths, and incompatible evaluation conventions when multiple tasks are combined in a single system. Moreover, this kind of design of multi-task system is often impractical for real-time applications because of high computational overhead.
+
+\method~\citep{facexformer2025} is an ambitious alternative: a unified transformer for ten heterogeneous facial analysis tasks. It reports a 33.21 FPS inference rate, a two-layer bidirectional FaceX decoder, and competitive or state-of-the-art results across multiple facial analysis tasks. This makes it an important case study for multi-task visual recognition: if reproduced, it offers a compact deployment model; if only partially reproducible, it exposes where current multi-task releases remain underspecified.
+
+The public \method release provides model architecture, pretrained weights and inference code, but not the training system. The missing pieces include the training loop, dataset adapters, multi-task batch sampler, loss definitions, task-specific augmentation logic, loss coefficients, and some metric protocols. These omissions are not small engineering details. In multi-task learning, sampling and loss scale directly determine which tasks dominate the shared representation. Similarly, metric normalization determines whether raw outputs are comparable to reported paper numbers.
+
+This work studies \method as both a model and a reproducibility artifact. We reconstruct an eight-task version of the training and evaluation pipeline, verify the released checkpoint, train a multi-task model, and analyze the observed performance metrics of the model. Our contributions are:
+
+\begin{itemize}
+\item a structured paper-vs-code audit of \method covering architecture, task tokens, task specific heads, losses, datasets, training infrastructure, and metrics;
+\item a reconstructed eight-task training pipeline with dataset loaders, augmentations, losses, task-balanced sampling, distributed training, checkpointing, and metric normalization;
+\item released-checkpoint verification on 129,060 evaluation samples, showing that segmentation, age estimation, and attribute prediction match the performance metrics claimed in the paper closely after normalization;
+\item a compact set of lessons for reporting multi-task vision systems: publish the full training pipeline, publish metric normalization rules, and document task-specific label mappings.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Task-specific facial analysis.}
+Facial analysis has traditionally been decomposed into separate prediction problems, each with its own architecture, preprocessing, loss function, and evaluation protocol. Landmark localization methods such as Wing Loss and STAR Loss focus on spatially precise point regression and annotation ambiguity \citep{wing2018,star2023}. Head-pose methods such as TokenHPE use orientation-aware transformer tokens \citep{tokenhpe2023}, while recognition methods such as ArcFace and PartialFC optimize large-scale identity embeddings \citep{arcface2019,partialfc2021}. These task-specialized systems remain strong baselines because they encode the output structure of a single task directly. They also motivate \method: a complete face-analysis pipeline often needs segmentation, landmarks, pose, attributes, demographics, expression, visibility, and recognition at once, as running many independent backbones duplicates computation.
+
+\paragraph{Multi-task face-analysis models.}
+Earlier multi-task face models demonstrated that facial tasks can share useful representations. HyperFace jointly modeled detection, landmarks, pose, and gender from fused CNN features \citep{hyperface2019}, while All-in-One CNN expanded the setting to detection, alignment, pose, gender, smile, age, and recognition \citep{allinone2017}. Recent transformer-based systems move toward task tokens and task queries. SwinFace uses a shared Swin backbone for recognition, expression, age, and attributes \citep{swinface2024}; QFace introduces task-adaptive query vectors and cross-attention over fused multi-stage features \citep{qface2024}; Faceptor is a close predecessor with task-specific queries and standardized output heads over multiple face-perception datasets \citep{faceptor2024}. \method is positioned beyond these systems by attempting broader ten-task unification with a lightweight decoder \citep{facexformer2025} achieving real-time inference.
+
+\paragraph{Tokenized transformers and reproducibility.}
+The design also reflects a broader shift from task-specific CNNs to tokenized transformer systems. DETR shows that learned queries can act as output slots for set prediction \citep{detr2020}; Swin Transformer provides a hierarchical backbone for dense and global prediction \citep{swin2021}; SegFormer shows that multi-scale transformer features can be fused efficiently with a lightweight MLP decoder \citep{segformer2021}; and FaRL demonstrates transferable facial representations from visual-linguistic pretraining \citep{farl2022}. Our work also follows reproducibility concerns raised by \citep{pineau2021,lipton2018}: code, data details, hyperparameters, evaluation protocols, and compute descriptions are necessary to attribute empirical gains to specified mechanisms rather than hidden implementation choices. \method is a useful stress test because the reported model depends on coupled details across datasets, token counts, losses, sampling, and metric normalization.
+
+\section{FaceXFormer and Reproduction Scope}
+
+\subsection{Architecture Summary}
+
+\method is an encoder-decoder transformer for face analysis. A 224$\times$224 RGB face is processed by an ImageNet-pretrained Swin-B encoder \citep{swin2021}, producing four feature stages at progressively coarser resolution. A SegFormer-style MLP-Fusion module projects the multi-scale features into a shared face representation $F$ \citep{segformer2021}. Learnable task tokens $T$ interact with $F$ through the FaceX decoder. Each decoder block contains task self-attention (TSA), task-to-face cross-attention (TFCA), and face-to-task cross-attention (FTCA). A final unified head routes refined tokens to task-specific prediction heads. Figure~\ref{fig:arch} summarizes the architecture and the bidirectional decoder block.
+
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig1_facexformer_pipeline.png}
+  \caption{\textbf{Architecture overview.} \method employs an encoder-decoder architecture, extracting multi-scale
+features from the input face image, and fusing them into a unified representation \textbf{F} via MLP-Fusion. Task tokens \textbf{T} are processed
+alongside face representation \textbf{F} in the FaceX Decoder, resulting in refined task-specific tokens. These refined tokens are then
+used for task-specific predictions by passing through the unified head. }
+  \label{fig:arch}
+\end{figure*}
+
+The novel bidirectional decoder is the key architectural claim. In a standard task-token decoder, tasks query the image representation. In \method, face tokens are also updated from task tokens through FTCA. This creates a feedback path in which task knowledge can refine the shared face representation before downstream heads are applied.
+
+\subsection{What Was Reproduced}
+
+The original paper reports ten tasks. Our final reproduction covers eight: segmentation (face parsing), landmark detection, head pose estimation, attributes prediction, age estimation, gender classification, race classification, and face visibility prediction. Facial expression recognition and face recognition are excluded from the final training scope because the released checkpoint does not have these tasks and adding them to our study would require a substantially different data and optimization stack. This scope is still large enough to test the central multi-task claim: a shared encoder-decoder can support dense prediction, coordinate regression, continuous regression, binary attributes, categorical demographics, and visibility outputs. 
+
+\begin{comment}
+ Table~\ref{tab:scope} marks the interpretation status for each group.
+
+\begin{table}[!b]
+\caption{\textbf{Reproduction scope and status.} Rows marked ``qualified'' are retained, but interpreted with the caveats described in Sec.~\ref{sec:results} and Sec.~\ref{sec:discussion}.}
+\label{tab:scope}
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+Task group & Reproduced evidence & Status \\
+\midrule
+Segmentation & CelebAMask-HQ F1; checkpoint and trained model & Clean \\
+Landmarks & 300W NME; checkpoint and trained model & Qualified \\
+Head pose & BIWI MAE; checkpoint and trained model & Qualified \\
+Attributes & CelebA and LFWA accuracy & Clean / diagnostic \\
+Age & UTKFace and FairFace MAE & Qualified \\
+Gender/race & UTKFace and FairFace accuracy & Diagnostic \\
+Visibility & COFW Recall@P80 & Qualified \\
+Expression/ID & Not implemented in reproduced code path & Out of scope \\
+\bottomrule
+\end{tabularx}
+\end{table}   
+\end{comment}
+
+
+\subsection{Paper-vs-Code Audit}
+
+The reproduction began with a structured audit. Each item was classified by paper claim, released/reproduced behavior, chosen resolution, and practical impact. Table~\ref{tab:gaps} condenses the high-impact findings. The release is best described as \emph{weights-only} for training reproducibility: the pretrained checkpoint and inference code are valuable, but they do not define the experiment that produced the reported model.
+
+\begin{table*}[!t]
+\caption{\textbf{High-impact paper-vs-code gaps.} The table keeps the core audit items from the long report while removing low-level implementation detail.}
+\label{tab:gaps}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\textwidth}{p{0.13\textwidth}YYYp{0.09\textwidth}}
+\toprule
+Component & Paper description & Release / reproduced behavior & Resolution in this study & Impact \\
+\midrule
+Training code & End-to-end multi-task training implied & Not released & Rebuilt training loop, checkpointing, logging, DDP, and mixed precision & \gap{Critical} \\
+Datasets & Ten dataset/task families & No loaders or split scripts & Implemented eight-task loaders and documented sample counts & \gap{Critical} \\
+Sampler & Joint multi-task optimization & No public sampler & Implemented task-balanced upsampling with epoch-level monitoring & \gap{High} \\
+Loss weights & Multi-loss objective $\sum_i \lambda_i L_i$ & Coefficients not in paper/release & Used $\lambda_i=1.0$ after author confirmation; discuss scale risk & \gap{High} \\
+Task tokens & 19 segmentation tokens, 68 landmark tokens, 9 pose tokens, 1 each for others & Repo-style 11 mask tokens, 1 landmark token, 1 pose token, 1 each for others & Followed reproducible code path; documented mismatch & \gap{High} \\
+Landmark head & 68 tokens with hourglass-style head & One token to MLP for 136 coordinates & Retained for reproducible pipeline; mark architecture divergence & \gap{High} \\
+Metrics & Paper-level units and protocols & Raw outputs mix fractions, percent, years, degrees & Built normalization manifest and paper-comparable table & \gap{High} \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\section{Methodology}
+
+\subsection{Data and Evaluation Protocol}
+
+The reconstructed pipeline uses the eight task groups listed in Table~\ref{tab:data}. We keep both paper-comparable rows and diagnostic rows. For example, CelebA attributes are paper-comparable, while LFWA attributes are cross-dataset diagnostic. FairFace gender/race rows are useful for debugging demographic heads, but they are not always paper-target rows because label taxonomies differ.
+
+\begin{table}[!b]
+\caption{\textbf{Datasets, evaluation rows, and normalization rules.} This compact table preserves the important counts and units from the full report.}
+\label{tab:data}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabularx}{\linewidth}{p{0.16\linewidth}p{0.20\linewidth}p{0.12\linewidth}p{0.16\linewidth}Y}
+\toprule
+Task & Dataset & Samples & Metric/unit & Notes \\
+\midrule
+Seg. & CelebAMask-HQ & 2,000 & F1, \% & 11-class mapping \\
+Lmk. & 300W full & 689 & NME, \% & Common/chall. also logged \\
+Pose & BIWI & 15,678 & MAE, deg & Protocol check needed \\
+Attr. & CelebA & 19,962 & Acc., \% & Paper-comparable \\
+Attr. & LFWA & 13,143 & Acc., \% & Cross-dataset diagnostic \\
+Age & UTKFace & 3,556 & MAE, yrs & Age-bin centers \\
+Age/G/R & FairFace & 21,908 & MAE/Acc. & Diagnostic heads \\
+Gender/race & UTKFace & 3,556 & Acc., \% & Shared parsed labels \\
+Vis. & COFW & 507 & R@P80, \% & Protocol-sensitive \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The full released-checkpoint evaluation includes 129,060 evaluated samples and 14 logged rows, because 300W is further split into full, common, and challenging rows. The training-result table in the long report follows the scoped 8-task story and reports the main dataset-task combinations.
+
+\subsection{Losses, Augmentation, and Sampling}
+
+The reproduced loss stack follows the task types: mean of dice loss and cross-entropy for segmentation, STARLoss for landmark detection, geodesic loss for headpose estimation,  pose loss through Euler-to-rotation conversion, binary cross-entropy for attributes and visibility, $L_1$ plus classification for age bins, and cross-entropy for gender and race. The objective is
+\begin{equation}
+L = \sum_i \lambda_i L_i,
+\end{equation}
+with $\lambda_i=1.0$ for the paper-faithful reproduction. This choice is important: equal numeric weights do not imply equal gradient influence because task losses live on different natural scales.
+
+Augmentation follows the paper appendix where specified: resizing to 224$\times$224, rotation, scaling, flipping, blur, grayscale, occlusion, and gamma adjustment, applied only when geometrically valid for the task. Landmark and pose augmentations update geometry-sensitive labels, while attribute and demographic transforms avoid label-changing operations.
+
+Multi-task sampling is implemented with dataset upsampling and task-aware batching. Without this, large datasets dominate optimization and small tasks such as COFW visibility appear rarely. The staged schedule starts with spatial tasks, then adds attributes and demographics, and finally trains the full eight-task set. Figure~\ref{fig:method} groups the audit summary with this staged schedule so the missing components and the chosen training resolution are visible together.
+
+\begin{figure*}[!b]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig8_gap_analysis_heatmap.png}
+    \caption{Gap analysis summary.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig3_staged_training_timeline.png}
+    \caption{3-to-6-to-8 task schedule.}
+  \end{subfigure}
+  \caption{\textbf{Reproduction methodology.} The audit identifies high-impact missing or divergent components; the training plan then stages optimization from spatial tasks to the full eight-task reproduction.}
+  \label{fig:method}
+\end{figure*}
+
+\subsection{Training Configuration}
+
+Training uses PyTorch distributed data parallel on 8$\times$A100 GPUs with FP16 mixed precision, AdamW, learning rate $10^{-4}$, weight decay $10^{-5}$, batch size 64, and a 12-epoch schedule with learning-rate drops at epochs 6 and 10. The backbone is initialized from ImageNet-pretrained Swin-B. The reproduction intentionally records raw metrics, normalized metrics, units, and normalization rules in the output manifest so that later comparisons are not dependent on implicit unit assumptions. Table~\ref{tab:metadata} summarizes the compact training and evaluation metadata.
+
+\begin{table}[!t]
+\caption{\textbf{Reproduction metadata.} Values are kept compact for the ICCV version; the long report stores the full paths and manifests.}
+\label{tab:metadata}
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\linewidth}{p{0.37\linewidth}Y}
+\toprule
+Field & Value \\
+\midrule
+Scope & Eight-task reproduction \\
+Tasks & Seg., landmark, pose, attr., age, gender, race, visibility \\
+Input size & 224$\times$224 RGB \\
+Backbone & ImageNet-pretrained Swin-B \\
+Optimizer & AdamW, lr $10^{-4}$, wd $10^{-5}$ \\
+Schedule & 12 epochs; lr drops at 6 and 10 \\
+Hardware & 8$\times$A100, DDP, FP16 \\
+Batch size & 64 \\
+Checkpoint & 1.1GB released model; SHA256 starts 327A...286D \\
+Baseline eval. & 129,060 samples, 14 logged rows \\
+Metric manifest & raw metric, normalized metric, unit, rule \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Artifact discipline.}
+The full report preserves the figure-generation manifest, metric JSON/CSV outputs, checkpoint metadata, and normalization rules. That bookkeeping is not cosmetic. It makes it possible to explain why 0.9177 should be compared to 91.77\%, why landmark rows are already in NME percent, and why age or visibility rows cannot be interpreted without split and protocol context. For this ICCV draft, we compress those artifacts into Tables~\ref{tab:data}--\ref{tab:results}, but the argument depends on the same provenance chain: every displayed number must be tied to a dataset row, metric unit, and interpretation status.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Released-Checkpoint Verification}
+
+The released checkpoint loads successfully and provides the cleanest evidence about the public model. Segmentation reaches 91.77 F1 on CelebAMask-HQ versus the paper target of 92.01. CelebA attribute accuracy is 91.72\% versus the paper target of 91.83\%. These two rows strongly support the claim that the public checkpoint captures substantial \method behavior.
+
+Other rows are more nuanced. Landmark NME on 300W full is 6.75 compared with the paper's 4.67, a moderate gap. Head pose is much worse under the current evaluation protocol: 20.65 degrees versus the paper's 3.52. Age on UTKFace is 1.17 years, which is better than the paper target of 4.17 and therefore should be treated as suspicious rather than as a clean improvement. COFW visibility is also above the paper target, which may reflect protocol mismatch around Recall@P80.
+
+\subsection{Eight-Task Training}
+
+The trained reproduction shows that the reconstructed pipeline is functional but not a complete reproduction of the paper. Segmentation reaches 85.91 F1, below the paper but meaningful for a reconstructed eight-task training run. CelebA attributes reach 91.27\%, within 0.56 percentage points of the paper target. LFWA attributes, UTKFace gender, and UTKFace race are useful diagnostic rows.
+
+Several rows are retained but professionally qualified. Landmark, head pose, and age training outputs are affected by known training/evaluation issues and are not comparable as final scientific results. FairFace gender/race and COFW visibility are also interpreted carefully because saturated or above-paper values may reflect label mapping, split composition, class imbalance, or metric implementation differences.
+
+\begin{table*}[!t]
+\caption{\textbf{Main quantitative summary.} ``CKPT'' is released-checkpoint inference after normalization. ``Train'' is the staged eight-task reproduction. A dash means the row was diagnostic or not directly paper-targeted in the long report. Qualified rows are retained for transparency but not used as unqualified claims.}
+\label{tab:results}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\textwidth}{p{0.09\textwidth}p{0.12\textwidth}p{0.11\textwidth}p{0.10\textwidth}p{0.10\textwidth}p{0.10\textwidth}Y}
+\toprule
+Task & Dataset & Metric & Paper & CKPT & Train & Interpretation \\
+\midrule
+Seg. & CelebAMask-HQ & F1 (\%) & 92.01 & 91.77 & 85.91 & CKPT matches; trained model functional but below paper \\
+Landmark & 300W full & NME (\%) & 4.67 & 6.75 & 0.0117 & CKPT gap; train row not comparable due to bug \\
+Landmark & 300W common & NME (\%) & 3.05 & 5.60 & -- & Diagnostic subset \\
+Landmark & 300W chall. & NME (\%) & -- & 11.50 & -- & Diagnostic subset \\
+Head pose & BIWI & MAE deg & 3.52 & 20.65 & 0.379 & Protocol/bug-qualified \\
+Attr. & CelebA & Acc. (\%) & 91.83 & 91.72 & 91.27 & Clean match for CKPT; close train row \\
+Attr. & LFWA & Acc. (\%) & -- & 61.06 & 59.87 & Cross-dataset diagnostic \\
+Age & UTKFace & MAE yrs & 4.17 & 1.17 & 35.27 & CKPT/training both qualified by split/bin issues \\
+Age & FairFace & MAE yrs & -- & 6.30 & 31.50 & Diagnostic; train row bug-qualified \\
+Gender & UTKFace & Acc. (\%) & -- & 99.18 & 85.04 & Diagnostic \\
+Gender & FairFace & Acc. (\%) & 95.22 & 93.11 & 100.00 & Train saturation requires verification \\
+Race & UTKFace & Acc. (\%) & -- & 98.03 & 73.26 & Diagnostic \\
+Race & FairFace & Acc. (\%) & -- & 64.59 & 99.96 & Train saturation requires verification \\
+Visibility & COFW & R@P80 (\%) & 72.56 & 87.13 & 99.25 & Protocol-sensitive; not claimed as improvement \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{What Is Cleanly Supported}
+
+Three conclusions are strongly supported. First, the released checkpoint is usable and credible for at least the segmentation and CelebA attribute rows. These metrics land close to the paper targets after unit normalization. Second, the reconstructed training system can train an eight-task model end to end: segmentation and attributes do not collapse, and diagnostic demographic outputs are produced. Third, metric normalization is necessary. Raw segmentation and attribute values are fractions, while paper values are percentages; landmark and head-pose values are already in paper-style units after the fixed manifest. Figure~\ref{fig:results} visualizes these results and the loss-scale issue that helps explain why equal task weights are not neutral.
+
+\begin{figure*}[!b]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig4_baseline_inference_bars.png}
+    \caption{Released-checkpoint verification.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig5_training_results_flagged.png}
+    \caption{Staged training results.}
+  \end{subfigure}
+  \vspace{2mm}
+  \begin{subfigure}[t]{0.54\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{assets/fig7_loss_scale_comparison.png}
+    \caption{Loss-scale comparison.}
+  \end{subfigure}
+  \caption{\textbf{Results and interpretation.} Checkpoint verification supports some original claims, especially segmentation and attributes. Training results identify a functional pipeline but also mark rows that require repair or protocol checks. Loss scale is a likely source of instability in the multi-task setting.}
+  \label{fig:results}
+\end{figure*}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{A checkpoint is not a training recipe.}
+The released \method checkpoint is valuable, but it cannot answer how the model was trained. A multi-task training recipe includes the data loaders, label mappings, sampler, augmentations, loss functions, coefficients, learning-rate schedule, task staging, and metric post-processing. Omitting those components forces independent reproducers to make new decisions, and those decisions become part of the reproduced model.
+
+\paragraph{Metric protocols are part of the method.}
+The results show that metric definitions are not passive reporting choices. A raw F1 fraction of 0.9177 is almost identical to 91.77\% only after multiplying by 100. Visibility Recall@P80 depends on precision-recall construction, thresholding, interpolation, label polarity, and class balance. Age MAE depends on split composition and bin-to-age conversion. These protocol details should be published beside weights and code.
+
+\paragraph{Architectural divergences matter.}
+The landmark and head-pose pathways contain the most consequential mismatches. The paper describes 68 landmark tokens and a head design with stronger spatial structure; the reproduced path uses one landmark token and an MLP to emit 136 coordinates. The paper describes 9 pose tokens for a rotation matrix; the reproduced path predicts 3 Euler angles from one token. These differences do not invalidate the study, but they mean the trained reproduction is not an exact architecture match.
+
+\paragraph{Loss scale is a first-order hyperparameter.}
+Equal $\lambda_i$ values are not neutral. Dice, cross-entropy, binary cross-entropy, continuous age error, and geometric pose losses can have very different magnitudes and gradients. The age rows are not final, but the broader lesson is independent of their final repaired value: multi-task papers should report loss coefficients and, ideally, gradient-scale diagnostics. Future work should compare equal weights, tuned weights, uncertainty weighting, and gradient-norm balancing under controlled conditions.
+
+\paragraph{Professional handling of qualified rows.}
+We keep bug-affected and protocol-sensitive rows in the paper because hiding them would make the reproduction look cleaner than it is. However, we do not present them as improvements or final failures. Landmark, head pose, and age training values are marked as not comparable. COFW visibility and saturated FairFace results are marked as protocol-sensitive diagnostics. This convention preserves evidence without overstating it.
+
+\section{Limitations and Future Work}
+
+The main limitation is that this is an eight-task reproduction rather than the full ten-task paper setting. Expression recognition and face recognition remain to be implemented. The second limitation is that some results require reruns after bug fixes, especially landmark, head pose, and age. The third limitation is protocol verification: BIWI head-pose preprocessing, COFW Recall@P80, FairFace race mapping, and age-bin conversion should be independently checked against the original paper and datasets.
+
+Future work should implement the paper-described 68-token landmark pathway and 9-token head-pose representation, add expression and recognition training, and run controlled loss-balancing experiments. A reproducibility release should include the exact training scripts, environment files, dataset manifests, split files, normalization rules, and figure-generation scripts.
+
+\section{Recommendations for Multi-Task Releases}
+
+The reproduction suggests several concrete release practices for broad multi-task systems. These recommendations are not specific to \method; they follow from the difficulty of reproducing any model whose central claim depends on joint optimization across heterogeneous labels.
+
+\paragraph{Release the unit of training, not only the unit of inference.}
+A checkpoint and inference script define how to run one trained model. They do not define how to reproduce it. For a multi-task model, the releasable unit should include the training loop, sampler, loss aggregation, data adapters, split manifests, augmentation policy, and all task-specific post-processing. The absence of any one component can change the effective experiment.
+
+\paragraph{Publish a task ledger.}
+Each task should have a short ledger specifying dataset split, target format, head shape, loss, raw metric, normalized metric, paper unit, and code path. This would have made several \method ambiguities immediately visible: segmentation class count, FairFace race mapping, age-bin conversion, and COFW Recall@P80 protocol.
+
+\paragraph{Report loss weights as results-critical hyperparameters.}
+In single-task papers, a missing loss coefficient may be recoverable from code. In multi-task papers, it changes the balance between tasks. Loss coefficients, gradient clipping, gradient accumulation, and balancing heuristics should be reported with the same care as learning rate and batch size.
+
+\paragraph{Keep diagnostic rows but label them.}
+Independent reproducers should not hide surprising rows. The professional response is to retain them with interpretation labels: clean, diagnostic, protocol-sensitive, or bug-qualified. This prevents two common failures: overclaiming an above-paper number as an improvement, or deleting a row that exposes a real reproducibility issue. Table~\ref{tab:checklist} distills the release artifacts that would reduce these ambiguities for future multi-task work.
+
+\begin{table}[!t]
+\caption{\textbf{Minimal release checklist for multi-task reproduction.}}
+\label{tab:checklist}
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\linewidth}{p{0.42\linewidth}Y}
+\toprule
+Artifact & Why it matters \\
+\midrule
+Training script & Defines optimization, staging, checkpoints \\
+Dataset manifest & Fixes splits, paths, and sample counts \\
+Label mapping & Prevents class-count/taxonomy drift \\
+Sampler & Controls task exposure during training \\
+Loss weights & Controls inter-task competition \\
+Metric rules & Makes raw outputs paper-comparable \\
+Environment file & Reduces dependency and version drift \\
+Figure/table scripts & Keeps reported values traceable \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Conclusion}
+
+This paper condenses a full \method reproduction report into an ICCV-style study. The balanced conclusion is that \method is a plausible and partially validated architecture, but the public release does not make the training process independently reproducible. The released checkpoint supports segmentation and attribute claims after correct metric normalization. The reconstructed eight-task training pipeline is functional, but several rows require professional qualification because of architectural divergences, evaluation bugs, or protocol ambiguity.
+
+The broader message is that multi-task reproducibility requires more than pretrained weights. It requires the complete training and evaluation system: loaders, samplers, losses, coefficients, schedules, label mappings, and metric rules. For unified face analysis models, those components are not implementation background; they define the experiment.

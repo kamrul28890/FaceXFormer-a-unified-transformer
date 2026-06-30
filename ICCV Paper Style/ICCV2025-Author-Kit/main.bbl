@@ -1,0 +1,131 @@
+\begin{thebibliography}{17}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[An et~al.(2021)An, Zhu, Xiao, Wu, Zhang, Gao, Qin, Zhang, and
+  Fu]{partialfc2021}
+Xiang An, Xuhan Zhu, Yang Xiao, Lan Wu, Ming Zhang, Yuan Gao, Bin Qin, Debing
+  Zhang, and Ying Fu.
+\newblock Partial fc: Training 10 million identities on a single machine.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on
+  Computer Vision Workshops (ICCVW)}, pages 1445--1449, 2021.
+
+\bibitem[Carion et~al.(2020)Carion, Massa, Synnaeve, Usunier, Kirillov, and
+  Zagoruyko]{detr2020}
+Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander
+  Kirillov, and Sergey Zagoruyko.
+\newblock End-to-end object detection with transformers.
+\newblock In \emph{Computer Vision -- ECCV 2020}, pages 213--229. Springer,
+  2020.
+
+\bibitem[Deng et~al.(2019)Deng, Guo, Xue, and Zafeiriou]{arcface2019}
+Jiankang Deng, Jia Guo, Niannan Xue, and Stefanos Zafeiriou.
+\newblock Arcface: Additive angular margin loss for deep face recognition.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision
+  and Pattern Recognition (CVPR)}, pages 4690--4699, 2019.
+
+\bibitem[Feng et~al.(2018)Feng, Kittler, Awais, Huber, and Wu]{wing2018}
+Zhen-Hua Feng, Josef Kittler, Muhammad Awais, Patrik Huber, and Xiao-Jun Wu.
+\newblock Wing loss for robust facial landmark localisation with convolutional
+  neural networks.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 2235--2245, 2018.
+
+\bibitem[Lipton and Steinhardt(2018)]{lipton2018}
+Zachary~C. Lipton and Jacob Steinhardt.
+\newblock Troubling trends in machine learning scholarship.
+\newblock \emph{arXiv preprint arXiv:1807.03341}, 2018.
+
+\bibitem[Liu et~al.(2021)Liu, Lin, Cao, Hu, Wei, Zhang, Lin, and Guo]{swin2021}
+Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and
+  Baining Guo.
+\newblock Swin transformer: Hierarchical vision transformer using shifted
+  windows.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on
+  Computer Vision (ICCV)}, pages 10012--10022, 2021.
+
+\bibitem[Narayan et~al.(2025)Narayan, VS, Chellappa, and
+  Patel]{facexformer2025}
+Kartik Narayan, Vibashan VS, Rama Chellappa, and Vishal~M. Patel.
+\newblock Facexformer: A unified transformer for facial analysis.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on
+  Computer Vision (ICCV)}, 2025.
+
+\bibitem[Pineau et~al.(2021)Pineau, Vincent-Lamarre, Sinha, Lariviere,
+  Beygelzimer, d'Alche Buc, Fox, and Larochelle]{pineau2021}
+Joelle Pineau, Philippe Vincent-Lamarre, Koustuv Sinha, Vincent Lariviere,
+  Alina Beygelzimer, Florence d'Alche Buc, Emily Fox, and Hugo Larochelle.
+\newblock Improving reproducibility in machine learning research: A report from
+  the neurips 2019 reproducibility program.
+\newblock \emph{Journal of Machine Learning Research}, 22\penalty0
+  (164):\penalty0 1--20, 2021.
+
+\bibitem[Qin et~al.(2024{\natexlab{a}})Qin, Wang, Deng, Wang, Chen, Hu, and
+  Deng]{swinface2024}
+Lixiong Qin, Mei Wang, Chao Deng, Ke Wang, Xi Chen, Jiani Hu, and Weihong Deng.
+\newblock Swinface: A multi-task transformer for face recognition, expression
+  recognition, age estimation and attribute estimation.
+\newblock \emph{IEEE Transactions on Circuits and Systems for Video
+  Technology}, 34\penalty0 (4):\penalty0 2223--2234, 2024{\natexlab{a}}.
+
+\bibitem[Qin et~al.(2024{\natexlab{b}})Qin, Wang, Liu, Zhang, Deng, Song, Xu,
+  and Deng]{faceptor2024}
+Lixiong Qin, Mei Wang, Xuannan Liu, Yuhang Zhang, Wei Deng, Xiaoshuai Song,
+  Weiran Xu, and Weihong Deng.
+\newblock Faceptor: A generalist model for face perception.
+\newblock In \emph{Computer Vision -- ECCV 2024}, pages 240--260. Springer,
+  2024{\natexlab{b}}.
+
+\bibitem[Ranjan et~al.(2017)Ranjan, Sankaranarayanan, Castillo, and
+  Chellappa]{allinone2017}
+Rajeev Ranjan, Swami Sankaranarayanan, Carlos~D. Castillo, and Rama Chellappa.
+\newblock An all-in-one convolutional neural network for face analysis.
+\newblock In \emph{2017 12th IEEE International Conference on Automatic Face \&
+  Gesture Recognition (FG 2017)}, pages 17--24, 2017.
+
+\bibitem[Ranjan et~al.(2019)Ranjan, Patel, and Chellappa]{hyperface2019}
+Rajeev Ranjan, Vishal~M. Patel, and Rama Chellappa.
+\newblock Hyperface: A deep multi-task learning framework for face detection,
+  landmark localization, pose estimation, and gender recognition.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine
+  Intelligence}, 41\penalty0 (1):\penalty0 121--135, 2019.
+
+\bibitem[Sun et~al.(2024)Sun, He, Shan, Han, and Chen]{qface2024}
+Haomiao Sun, Mingjie He, Shiguang Shan, Hu Han, and Xilin Chen.
+\newblock Task-adaptive q-face.
+\newblock \emph{arXiv preprint arXiv:2405.09059}, 2024.
+
+\bibitem[Xie et~al.(2021)Xie, Wang, Yu, Anandkumar, Alvarez, and
+  Luo]{segformer2021}
+Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar, Jose~M. Alvarez, and Ping
+  Luo.
+\newblock Segformer: Simple and efficient design for semantic segmentation with
+  transformers.
+\newblock In \emph{Advances in Neural Information Processing Systems}, pages
+  12077--12090, 2021.
+
+\bibitem[Zhang et~al.(2023)Zhang, Liu, Deng, Xie, and Li]{tokenhpe2023}
+Cheng Zhang, Hai Liu, Yongjian Deng, Bochen Xie, and Youfu Li.
+\newblock Tokenhpe: Learning orientation tokens for efficient head pose
+  estimation via transformers.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision
+  and Pattern Recognition (CVPR)}, pages 8897--8906, 2023.
+
+\bibitem[Zheng et~al.(2022)Zheng, Yang, Zhang, Bao, Chen, Huang, Yuan, Chen,
+  Zeng, and Wen]{farl2022}
+Yinglin Zheng, Hao Yang, Ting Zhang, Jianmin Bao, Dongdong Chen, Yangyu Huang,
+  Lu Yuan, Dong Chen, Ming Zeng, and Fang Wen.
+\newblock General facial representation learning in a visual-linguistic manner.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision
+  and Pattern Recognition (CVPR)}, pages 18697--18709, 2022.
+
+\bibitem[Zhou et~al.(2023)Zhou, Li, Liu, Wang, Yu, and Ji]{star2023}
+Zhenglin Zhou, Huaxia Li, Hong Liu, Nanyang Wang, Gang Yu, and Rongrong Ji.
+\newblock Star loss: Reducing semantic ambiguity in facial landmark detection.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision
+  and Pattern Recognition (CVPR)}, pages 15475--15484, 2023.
+
+\end{thebibliography}
